@@ -16,7 +16,7 @@ Use them at your own discretion.
 
 ## Credits
 
-Some scripts were written by me, others were adapted with help from AI tools (ChatGPT / Claude), and a few come from the Canvas Community or former contributors.  
+Some scripts were written by me with help from AI tools (ChatGPT/Claude) and a few come from the Canvas Community or former contributors.  
 Credit is included where known.
 
 ---
