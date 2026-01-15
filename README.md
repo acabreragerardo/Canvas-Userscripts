@@ -1,6 +1,6 @@
-# Canvas Userscripts for FIU Online
+# Canvas Userscripts
 
-Collection of Canvas userscripts for FIU Online instructional designers.  
+Collection of Canvas userscripts that improve effiency and provide quality of life. 
 Includes original scripts and community-adapted tools to enhance Canvas UX and workflow.
 
 ---
