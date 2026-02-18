@@ -1,0 +1,426 @@
+// ==UserScript==
+// @name         Canvas | Settings | Content Migrations Viewer
+// @version      1.3
+// @author       Alex but really it's Claude, Ricardo came up with the idea
+// @description  View content migration history on Canvas course pages
+// @match        https://*.instructure.com/courses/*/content_migrations*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Extract course ID from URL
+    const courseId = window.location.pathname.match(/\/courses\/(\d+)/)?.[1];
+    if (!courseId) return;
+
+    // Wait for the target div to be available
+    function initButton() {
+        const targetDiv = document.querySelector('.right-of-crumbs.right-of-crumbs-no-reverse');
+        if (!targetDiv) {
+            // Try again in 100ms if the div isn't loaded yet
+            setTimeout(initButton, 100);
+            return;
+        }
+
+        // Create button with Canvas-like styling
+        const button = document.createElement('a');
+        button.href = '#';
+        button.className = 'btn button-sidebar-wide';
+        button.id = 'tm-migration-viewer';
+        button.innerHTML = '⚡ Course Import Audit';
+        button.style.cssText = `
+            margin-left: 10px;
+            border: 2px solid #0374B5;
+            transition: background-color 0.2s ease;
+        `;
+
+        // Add hover effect
+        button.addEventListener('mouseenter', function() {
+            this.style.setProperty('background-color', '#e8e8e8', 'important');
+        });
+        button.addEventListener('mouseleave', function() {
+            this.style.setProperty('background-color', '', '');
+        });
+
+        // Insert button into the target div
+        targetDiv.appendChild(button);
+
+        // Setup click handler
+        button.onclick = (e) => {
+            e.preventDefault();
+            fetchMigrations();
+        };
+    }
+
+    // Create modal
+    const modal = document.createElement('div');
+    modal.style.cssText = `
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0,0,0,0.5);
+        z-index: 10001;
+        justify-content: center;
+        align-items: center;
+    `;
+
+    const modalContent = document.createElement('div');
+    modalContent.style.cssText = `
+        background: white;
+        padding: 24px;
+        border-radius: 8px;
+        max-width: 900px;
+        max-height: 80vh;
+        overflow-y: auto;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+        width: 90%;
+    `;
+
+    const modalHeader = document.createElement('div');
+    modalHeader.style.cssText = `
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+        border-bottom: 2px solid #e5e5e5;
+        padding-bottom: 12px;
+    `;
+
+    const modalTitle = document.createElement('h2');
+    modalTitle.textContent = 'Content Migration History';
+    modalTitle.style.cssText = 'margin: 0; color: #2d3b45;';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '✕';
+    closeBtn.style.cssText = `
+        background: none;
+        border: none;
+        font-size: 24px;
+        cursor: pointer;
+        color: #666;
+        padding: 0;
+        width: 30px;
+        height: 30px;
+    `;
+    closeBtn.onclick = () => modal.style.display = 'none';
+
+    const contentArea = document.createElement('div');
+    contentArea.id = 'migrations-content';
+
+    modalHeader.appendChild(modalTitle);
+    modalHeader.appendChild(closeBtn);
+    modalContent.appendChild(modalHeader);
+    modalContent.appendChild(contentArea);
+    modal.appendChild(modalContent);
+
+    // Close modal when clicking outside
+    modal.onclick = (e) => {
+        if (e.target === modal) modal.style.display = 'none';
+    };
+
+    document.body.appendChild(modal);
+
+    // Cache for course enrollments
+    let enrollmentsCache = null;
+
+    // Fetch all enrollments for the course
+    async function fetchCourseEnrollments(csrfToken) {
+        if (enrollmentsCache) return enrollmentsCache;
+
+        try {
+            const allEnrollments = [];
+            let page = 1;
+            let hasMore = true;
+
+            // Fetch all pages of enrollments
+            while (hasMore && page <= 10) {
+                const response = await fetch(`/api/v1/courses/${courseId}/enrollments?per_page=100&page=${page}`, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'X-CSRF-Token': csrfToken || ''
+                    }
+                });
+
+                if (!response.ok) break;
+
+                const enrollments = await response.json();
+                if (enrollments.length === 0) {
+                    hasMore = false;
+                } else {
+                    allEnrollments.push(...enrollments);
+                    page++;
+                }
+            }
+
+            // Create a map of user_id to user info
+            enrollmentsCache = {};
+            allEnrollments.forEach(enrollment => {
+                if (enrollment.user && enrollment.user.id) {
+                    enrollmentsCache[enrollment.user.id] = {
+                        name: enrollment.user.name,
+                        role: enrollment.role
+                    };
+                }
+            });
+
+            return enrollmentsCache;
+        } catch (error) {
+            console.error('Error fetching enrollments:', error);
+            return {};
+        }
+    }
+
+    // Get user name from enrollments or fall back to API
+    async function fetchUserName(userId, csrfToken) {
+        // First try to get from course enrollments
+        const enrollments = await fetchCourseEnrollments(csrfToken);
+        if (enrollments[userId]) {
+            return enrollments[userId];
+        }
+
+        // Fall back to direct user API call
+        try {
+            const response = await fetch(`/api/v1/users/${userId}`, {
+                headers: {
+                    'Accept': 'application/json',
+                    'X-CSRF-Token': csrfToken || ''
+                }
+            });
+
+            if (response.ok) {
+                const user = await response.json();
+                return { name: user.name || 'Unknown User', role: null };
+            }
+        } catch (error) {
+            console.error(`Error fetching user ${userId}:`, error);
+        }
+        return null;
+    }
+
+    // Fetch detailed migration info
+    async function fetchMigrationDetails(migrationId, csrfToken) {
+        try {
+            const response = await fetch(`/api/v1/courses/${courseId}/content_migrations/${migrationId}`, {
+                headers: {
+                    'Accept': 'application/json',
+                    'X-CSRF-Token': csrfToken || ''
+                }
+            });
+
+            if (response.ok) {
+                return await response.json();
+            }
+        } catch (error) {
+            console.error(`Error fetching details for migration ${migrationId}:`, error);
+        }
+        return null;
+    }
+
+    // Fetch migration issues
+    async function fetchMigrationIssues(migrationId, csrfToken) {
+        try {
+            const response = await fetch(`/api/v1/courses/${courseId}/content_migrations/${migrationId}/migration_issues`, {
+                headers: {
+                    'Accept': 'application/json',
+                    'X-CSRF-Token': csrfToken || ''
+                }
+            });
+
+            if (response.ok) {
+                return await response.json();
+            }
+        } catch (error) {
+            console.error(`Error fetching issues for migration ${migrationId}:`, error);
+        }
+        return [];
+    }
+
+    // Fetch and display migrations
+    async function fetchMigrations() {
+        contentArea.innerHTML = '<p style="text-align: center; padding: 20px;">Loading migrations...</p>';
+        modal.style.display = 'flex';
+
+        try {
+            const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content;
+
+            const response = await fetch(`/api/v1/courses/${courseId}/content_migrations?per_page=50`, {
+                headers: {
+                    'Accept': 'application/json',
+                    'X-CSRF-Token': csrfToken || ''
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`API request failed: ${response.status}`);
+            }
+
+            const migrations = await response.json();
+
+            if (migrations.length === 0) {
+                contentArea.innerHTML = '<p style="text-align: center; color: #666;">No content migrations found for this course.</p>';
+                return;
+            }
+
+            // Display migrations
+            let html = '';
+
+            for (const migration of migrations) {
+                // Fetch full details for this migration
+                const detailedMigration = await fetchMigrationDetails(migration.id, csrfToken);
+                const fullMigration = detailedMigration || migration;
+
+                console.log('Full migration details:', fullMigration);
+
+                const createdDate = new Date(fullMigration.created_at);
+                const finishedDate = fullMigration.finished_at ? new Date(fullMigration.finished_at) : null;
+                const userId = fullMigration.user_id;
+
+                // Fetch user name if we have a user_id
+                let userName = 'Unknown User';
+                let userIdDisplay = 'N/A';
+                let userRole = '';
+                if (userId) {
+                    userIdDisplay = userId;
+                    const userInfo = await fetchUserName(userId, csrfToken);
+                    if (userInfo && userInfo.name) {
+                        userName = userInfo.name;
+                        if (userInfo.role) {
+                            userRole = ` <span style="color: #888; font-size: 12px;">[${userInfo.role.replace('Enrollment', '')}]</span>`;
+                        }
+                    }
+                }
+
+                // Parse migration type with better labels
+                let migrationType = fullMigration.migration_type || 'Unknown';
+                let migrationIcon = '📦';
+                if (migrationType === 'course_copy_importer') {
+                    migrationType = 'Course Copy';
+                    migrationIcon = '📋';
+                } else if (migrationType === 'canvas_cartridge_importer') {
+                    migrationType = 'Canvas Course Export';
+                    migrationIcon = '📦';
+                } else if (migrationType === 'common_cartridge_importer') {
+                    migrationType = 'Common Cartridge (IMS/QTI)';
+                    migrationIcon = '📦';
+                } else if (migrationType === 'zip_file_importer') {
+                    migrationType = 'ZIP File Import';
+                    migrationIcon = '🗜️';
+                } else if (migrationType === 'qti_converter') {
+                    migrationType = 'QTI Quiz Import';
+                    migrationIcon = '❓';
+                } else if (migrationType === 'moodle_converter') {
+                    migrationType = 'Moodle 1.9 Import';
+                    migrationIcon = '🎓';
+                } else if (migrationType === 'blackboard_exporter') {
+                    migrationType = 'Blackboard Import';
+                    migrationIcon = '⬛';
+                } else if (migrationType === 'd2l_exporter') {
+                    migrationType = 'D2L/Brightspace Import';
+                    migrationIcon = '💡';
+                }
+
+                // Get source course info
+                let sourceInfo = 'N/A';
+                if (fullMigration.settings?.source_course_id) {
+                    sourceInfo = `Course ID: ${fullMigration.settings.source_course_id}`;
+                    if (fullMigration.settings.source_course_name) {
+                        sourceInfo = fullMigration.settings.source_course_name;
+                    }
+                }
+
+                // Status with color
+                const status = fullMigration.workflow_state || 'unknown';
+                let statusColor = '#666';
+                if (status === 'completed') statusColor = '#0B874B';
+                else if (status === 'failed') statusColor = '#D01F1F';
+                else if (status === 'running' || status === 'pre_processing') statusColor = '#FC5E13';
+
+                // Calculate duration
+                let duration = '';
+                if (finishedDate && fullMigration.started_at) {
+                    const startDate = new Date(fullMigration.started_at);
+                    const durationMs = finishedDate - startDate;
+                    const minutes = Math.floor(durationMs / 60000);
+                    const seconds = Math.floor((durationMs % 60000) / 1000);
+                    duration = `${minutes}m ${seconds}s`;
+                }
+
+                // Fetch issues if there are any
+                let issuesHtml = '';
+                if (fullMigration.migration_issues_count > 0) {
+                    const issues = await fetchMigrationIssues(fullMigration.id, csrfToken);
+                    if (issues.length > 0) {
+                        issuesHtml = '<div style="margin-top: 12px; padding: 12px; background: #FFF4E6; border-left: 3px solid #FC5E13; border-radius: 4px;">';
+                        issuesHtml += '<strong style="color: #C45500;">⚠️ Issues Found:</strong><ul style="margin: 8px 0 0 0; padding-left: 20px;">';
+                        issues.slice(0, 5).forEach(issue => {
+                            issuesHtml += `<li style="margin: 4px 0; color: #555;">${issue.description || 'Unknown issue'}</li>`;
+                        });
+                        if (issues.length > 5) {
+                            issuesHtml += `<li style="margin: 4px 0; color: #888; font-style: italic;">...and ${issues.length - 5} more</li>`;
+                        }
+                        issuesHtml += '</ul></div>';
+                    }
+                }
+
+                // Selective import info
+                let selectiveHtml = '';
+                if (fullMigration.selective_import) {
+                    selectiveHtml = '<div style="margin-top: 8px; padding: 8px; background: #FFF9E6; border-left: 3px solid #F0AD4E; border-radius: 4px; font-size: 13px;">🎯 <strong>Selective Import</strong> - Only specific content was copied</div>';
+                }
+
+                html += `
+                    <div style="
+                        border: 1px solid #e5e5e5;
+                        border-radius: 6px;
+                        padding: 16px;
+                        margin-bottom: 16px;
+                        background: #f9f9f9;
+                    ">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 8px; align-items: center;">
+                            <strong style="color: #2d3b45; font-size: 16px;">${migrationIcon} ${migrationType}</strong>
+                            <span style="
+                                padding: 4px 12px;
+                                border-radius: 12px;
+                                background: ${statusColor};
+                                color: white;
+                                font-size: 12px;
+                                font-weight: 600;
+                                text-transform: uppercase;
+                            ">${status}</span>
+                        </div>
+                        <div style="color: #555; line-height: 1.6;">
+                            <div><strong>👤 Performed by:</strong> ${userName}${userRole} <span style="color: #888;">(ID: ${userIdDisplay})</span></div>
+                            <div><strong>📚 Source:</strong> ${sourceInfo}</div>
+                            <div><strong>🕐 Started:</strong> ${createdDate.toLocaleString()}</div>
+                            ${finishedDate ? `<div><strong>✓ Finished:</strong> ${finishedDate.toLocaleString()}</div>` : ''}
+                            ${duration ? `<div><strong>⏱️ Duration:</strong> ${duration}</div>` : ''}
+                        </div>
+                        ${selectiveHtml}
+                        ${issuesHtml}
+                        <div style="margin-top: 8px; font-size: 12px; color: #888;">
+                            Migration ID: ${fullMigration.id}
+                        </div>
+                    </div>
+                `;
+            }
+
+            contentArea.innerHTML = html;
+
+        } catch (error) {
+            console.error('Error fetching migrations:', error);
+            contentArea.innerHTML = `
+                <p style="color: #D01F1F; text-align: center; padding: 20px;">
+                    Error loading migrations: ${error.message}<br>
+                    <small>Check the console for more details.</small>
+                </p>
+            `;
+        }
+    }
+
+    // Initialize the button
+    initButton();
+})();
