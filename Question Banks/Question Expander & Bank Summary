@@ -1,0 +1,433 @@
+// ==UserScript==
+// @name         Canvas | Question Banks | Question Expander & Bank Summary
+// @version      1.3
+// @description  Add button to expand all questions in Canvas question bank
+// @author       Alex C & Claude
+// @match        https://*.instructure.com/courses/*/question_banks/*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Wait for the page to load
+    function waitForElement(selector, callback) {
+        const element = document.querySelector(selector);
+        if (element) {
+            callback();
+        } else {
+            setTimeout(() => waitForElement(selector, callback), 100);
+        }
+    }
+
+    function addExpandButton() {
+        const rightSideWrapper = document.getElementById('right-side-wrapper');
+        if (!rightSideWrapper) {
+            console.log('right-side-wrapper not found');
+            return;
+        }
+
+        // Check if button already exists
+        if (document.getElementById('expand-all-questions-btn')) {
+            return;
+        }
+
+        // Create the button with consistent styling
+        const expandButton = document.createElement('a');
+        expandButton.href = '#';
+        expandButton.className = 'btn button-sidebar-wide';
+        expandButton.id = 'expand-all-questions-btn';
+        expandButton.innerHTML = '⚡Expand All Questions';
+        expandButton.style = 'margin-bottom: 10px; border: 2px solid #0374B5; transition: background-color 0.2s ease;';
+
+        // Add hover effect with !important to override Canvas styles
+        expandButton.addEventListener('mouseenter', function() {
+            this.style.setProperty('background-color', '#e8e8e8', 'important');
+        });
+        expandButton.addEventListener('mouseleave', function() {
+            this.style.setProperty('background-color', '', '');
+        });
+
+        // Add click functionality
+        expandButton.addEventListener('click', function(e) {
+            e.preventDefault();
+            startExpandProcess();
+        });
+
+        // Insert the button at the top of the right sidebar
+        rightSideWrapper.insertBefore(expandButton, rightSideWrapper.firstChild);
+    }
+
+    function startExpandProcess() {
+        const button = document.getElementById('expand-all-questions-btn');
+        button.textContent = '⚡Loading all questions...';
+        button.style.pointerEvents = 'none';
+
+        // First, load all questions
+        loadAllQuestions(button);
+    }
+
+    function loadAllQuestions(button) {
+        const moreQuestionsDiv = document.getElementById('more_questions');
+
+        if (!moreQuestionsDiv) {
+            console.log('No "more questions" div found - all questions already loaded');
+            // All questions are loaded, proceed to expand
+            expandAllQuestions(button);
+            return;
+        }
+
+        // Check the data attributes to see if we're on the last page
+        const currentPage = parseInt(moreQuestionsDiv.getAttribute('data-current-page') || '1');
+        const totalPages = parseInt(moreQuestionsDiv.getAttribute('data-total-pages') || '1');
+
+        console.log(`Current page: ${currentPage}, Total pages: ${totalPages}`);
+
+        if (currentPage >= totalPages) {
+            console.log('All pages loaded - proceeding to expand');
+            // All questions are loaded, proceed to expand
+            expandAllQuestions(button);
+            return;
+        }
+
+        const moreLink = moreQuestionsDiv.querySelector('a.more_questions_link');
+
+        if (!moreLink) {
+            console.log('No "more questions" link found - all questions already loaded');
+            // All questions are loaded, proceed to expand
+            expandAllQuestions(button);
+            return;
+        }
+
+        // Click the "more questions" link
+        console.log('Clicking "more questions" link...');
+        moreLink.click();
+
+        // Wait a bit and check again
+        setTimeout(() => {
+            loadAllQuestions(button); // Recursively load more
+        }, 800);
+    }
+
+    function expandAllQuestions(button) {
+        console.log('All questions loaded, now expanding...');
+
+        // First, check if the "Show Question Details" checkbox exists
+        const detailsCheckbox = document.getElementById('show_question_details');
+
+        if (detailsCheckbox) {
+            console.log('Found "Show Question Details" checkbox - trying to enable it');
+
+            if (!detailsCheckbox.checked) {
+                detailsCheckbox.click();
+            }
+
+            // Wait a moment and check if it actually worked
+            button.textContent = '⚡Expanding...';
+
+            setTimeout(() => {
+                // Check if we now have question_type elements visible
+                const questionTypeElements = document.querySelectorAll('span.question_type');
+                let validTypes = 0;
+                questionTypeElements.forEach(el => {
+                    if (el.textContent.trim().length > 0) validTypes++;
+                });
+
+                console.log(`After checkbox click: Found ${validTypes} valid question types`);
+
+                if (validTypes > 0) {
+                    // Checkbox worked! Show summary
+                    console.log('Checkbox successfully expanded questions');
+                    button.textContent = '⚡Expand All Questions';
+                    button.style.pointerEvents = '';
+                    showQuestionTypeSummary();
+                    return;
+                } else {
+                    // Checkbox didn't work - must be 50+ questions, use click method
+                    console.log('Checkbox did not expand questions - using click method for 50+ questions');
+                    expandByClicking(button);
+                }
+            }, 1000);
+
+            return;
+        }
+
+        // No checkbox found - use the click method
+        console.log('No checkbox found - using click method');
+        expandByClicking(button);
+    }
+
+    function expandByClicking(button) {
+        const questionLinks = document.querySelectorAll('a.question_teaser_link');
+
+        if (questionLinks.length === 0) {
+            alert('No questions found to expand');
+            button.textContent = '⚡Expand All Questions';
+            button.style.pointerEvents = '';
+            return;
+        }
+
+        let expandedCount = 0;
+
+        // Update button text to show progress
+        button.textContent = `⚡Expanding... (0/${questionLinks.length})`;
+
+        // Click each question link with a small delay to avoid overwhelming the page
+        questionLinks.forEach((link, index) => {
+            setTimeout(() => {
+                // Check if the question is already expanded by looking for expanded content
+                const questionContainer = link.closest('.question_holder');
+                const isExpanded = questionContainer && questionContainer.querySelector('.question_content, .display_question .content');
+
+                if (!isExpanded) {
+                    // Create a custom event that prevents navigation
+                    const clickEvent = new Event('click', { bubbles: true, cancelable: true });
+
+                    // Temporarily override the href to prevent navigation
+                    const originalHref = link.href;
+                    link.href = 'javascript:void(0)';
+
+                    // Click the link
+                    link.click();
+
+                    // Restore original href
+                    setTimeout(() => {
+                        link.href = originalHref;
+                    }, 10);
+                }
+
+                expandedCount++;
+                button.textContent = `⚡Expanding... (${expandedCount}/${questionLinks.length})`;
+
+                // Reset button and show summary when done
+                if (expandedCount === questionLinks.length) {
+                    console.log('All questions expanded, waiting before summary...');
+                    setTimeout(() => {
+                        console.log('Starting question type summary...');
+                        button.textContent = '⚡Expand All Questions';
+                        button.style.pointerEvents = '';
+                        showQuestionTypeSummary();
+                    }, 1000); // Wait a bit longer for all questions to fully load
+                }
+            }, index * 100); // 100ms delay between each click
+        });
+
+        console.log(`Attempting to expand ${questionLinks.length} questions`);
+    }
+
+    function showQuestionTypeSummary() {
+        console.log('showQuestionTypeSummary() called');
+
+        // Count question types
+        const questionTypes = {};
+        const questionTypeElements = document.querySelectorAll('span.question_type');
+
+        console.log(`Found ${questionTypeElements.length} span.question_type elements`);
+
+        questionTypeElements.forEach((element, index) => {
+            const type = element.textContent.trim();
+
+            // Debug: log what we find
+            console.log(`Question type ${index + 1}: "${type}" (length: ${type.length})`);
+
+            // Only count non-empty types (more robust filtering)
+            if (type && type.length > 0 && type !== '') {
+                questionTypes[type] = (questionTypes[type] || 0) + 1;
+            } else {
+                console.log(`Skipping empty question type at index ${index + 1}`);
+            }
+        });
+
+        // Convert technical names to readable names
+        const readableNames = {
+            'multiple_choice_question': 'Multiple Choice',
+            'true_false_question': 'True/False',
+            'essay_question': 'Essay',
+            'fill_in_multiple_blanks_question': 'Fill in Multiple Blanks',
+            'multiple_answers_question': 'Multiple Answer',
+            'multiple_dropdowns_question': 'Multiple Dropdowns',
+            'matching_question': 'Matching',
+            'short_answer_question': 'Fill-in-the-Blank',
+            'numerical_question': 'Numerical',
+            'calculated_question': 'Calculated',
+            'file_upload_question': 'File Upload',
+            'text_only_question': 'Text Only'
+        };
+
+        // Create summary text
+        let summaryText = 'Question Type Summary:\n\n';
+        let totalQuestions = 0;
+
+        Object.entries(questionTypes).forEach(([type, count]) => {
+            const readableName = readableNames[type] || type;
+            // Double-check: Skip empty types in display (shouldn't happen now, but just in case)
+            if (type && type.length > 0 && type !== '') {
+                summaryText += `${readableName}: ${count}\n`;
+                totalQuestions += count;
+            }
+        });
+
+        summaryText += `\nTotal: ${totalQuestions} questions`;
+
+        // Debug info
+        console.log('Question types found:', questionTypes);
+        console.log('Total elements found:', questionTypeElements.length);
+
+        // Also update question titles with types
+        updateQuestionTitles();
+
+        // Show toast notification
+        showToast(summaryText);
+    }
+
+    function updateQuestionTitles() {
+        console.log('Updating question titles with types...');
+
+        // Convert technical names to readable names
+        const readableNames = {
+            'multiple_choice_question': 'Multiple Choice',
+            'true_false_question': 'True/False',
+            'essay_question': 'Essay',
+            'fill_in_multiple_blanks_question': 'Fill in Multiple Blanks',
+            'multiple_answers_question': 'Multiple Answer',
+            'multiple_dropdowns_question': 'Multiple Dropdowns',
+            'matching_question': 'Matching',
+            'short_answer_question': 'Short Answer',
+            'numerical_question': 'Numerical',
+            'calculated_question': 'Calculated',
+            'file_upload_question': 'File Upload',
+            'text_only_question': 'Text Only'
+        };
+
+        // Find all question containers
+        const questionHolders = document.querySelectorAll('.question_holder');
+
+        questionHolders.forEach((holder, index) => {
+            // Find the question name element and question type element in this holder
+            const nameElement = holder.querySelector('.question_name');
+            const typeElement = holder.querySelector('span.question_type');
+
+            if (nameElement && typeElement) {
+                const questionType = typeElement.textContent.trim();
+
+                // Skip if empty type
+                if (!questionType || questionType === '') {
+                    return;
+                }
+
+                const readableName = readableNames[questionType] || questionType;
+
+                // Check if label already exists
+                const existingLabel = holder.querySelector('.tm-question-type-label');
+
+                if (existingLabel) {
+                    // Update existing label in case the type changed
+                    existingLabel.textContent = ` — ${readableName}`;
+                    console.log(`Updated existing label for question ${index + 1}: "${readableName}"`);
+                } else {
+                    // Create new label
+                    const typeLabel = document.createElement('span');
+                    typeLabel.className = 'tm-question-type-label';
+                    typeLabel.textContent = ` — ${readableName}`;
+                    typeLabel.style.cssText = 'color: #666; font-weight: normal;';
+
+                    // Insert the label after the name element
+                    nameElement.parentNode.insertBefore(typeLabel, nameElement.nextSibling);
+
+                    console.log(`Added type label for question ${index + 1}: "${readableName}"`);
+                }
+            }
+        });
+
+        console.log('Question title updates complete');
+    }
+
+    function showToast(message) {
+        // Create toast element
+        const toast = document.createElement('div');
+        toast.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #2d3748;
+            color: white;
+            padding: 16px 20px;
+            border-radius: 8px;
+            font-family: Arial, sans-serif;
+            font-size: 14px;
+            line-height: 1.4;
+            white-space: pre-line;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            z-index: 10000;
+            max-width: 300px;
+            opacity: 0;
+            transform: translateX(100%);
+            transition: all 0.3s ease;
+        `;
+        toast.textContent = message;
+
+        // Add close button
+        const closeBtn = document.createElement('button');
+        closeBtn.innerHTML = '×';
+        closeBtn.style.cssText = `
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            background: none;
+            border: none;
+            color: white;
+            font-size: 18px;
+            cursor: pointer;
+            padding: 0;
+            width: 20px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        `;
+        closeBtn.addEventListener('click', () => {
+            toast.style.opacity = '0';
+            toast.style.transform = 'translateX(100%)';
+            setTimeout(() => toast.remove(), 300);
+        });
+        toast.appendChild(closeBtn);
+
+        document.body.appendChild(toast);
+
+        // Animate in
+        setTimeout(() => {
+            toast.style.opacity = '1';
+            toast.style.transform = 'translateX(0)';
+        }, 10);
+
+        // Auto-hide after 8 seconds
+        setTimeout(() => {
+            if (toast.parentNode) {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateX(100%)';
+                setTimeout(() => toast.remove(), 300);
+            }
+        }, 8000);
+    }
+
+    // Initialize the script
+    waitForElement('#right-side-wrapper', addExpandButton);
+
+    // Also try to add the button if the page content changes (for SPA navigation)
+    const observer = new MutationObserver(function(mutations) {
+        mutations.forEach(function(mutation) {
+            if (mutation.type === 'childList') {
+                addExpandButton();
+            }
+        });
+    });
+
+    // Start observing
+    if (document.body) {
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+    }
+
+})();
