@@ -1,0 +1,620 @@
+// ==UserScript==
+// @name         Canvas | Question Banks | Analyze Bank Usage
+// @version      1.21
+// @description  Displays which quizzes/exams use each question bank on the Question Banks page
+// @match        https://*.instructure.com/courses/*/question_banks
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Debug log function
+    function debugLog(message, data) {
+        console.log(`%c[Bank Usage Debug] ${message}`, 'color: #0374B5; font-weight: bold;', data || '');
+    }
+
+    // Function to get all quizzes for the course
+    function getAllQuizzes(courseId) {
+        debugLog(`Fetching quizzes for course ${courseId}`);
+        return fetch(`/api/v1/courses/${courseId}/quizzes?per_page=100`, {
+            method: 'GET',
+            credentials: 'include'
+        }).then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response.json();
+        }).then(quizzes => {
+            debugLog(`Found ${quizzes.length} quizzes`, quizzes);
+            return quizzes;
+        });
+    }
+
+    // Function to get the HTML of a quiz for parsing
+    async function getQuizHTML(courseId, quizId) {
+        try {
+            const response = await fetch(`/courses/${courseId}/quizzes/${quizId}`, {
+                method: 'GET',
+                credentials: 'include',
+                headers: {
+                    'Accept': 'text/html'
+                }
+            });
+
+            if (response.ok) {
+                return await response.text();
+            }
+            return null;
+        } catch (error) {
+            debugLog(`Error fetching quiz HTML for ${quizId}:`, error);
+            return null;
+        }
+    }
+
+    // Function to fetch the edit page of a quiz to find question bank references
+    async function getQuizEditHTML(courseId, quizId) {
+        try {
+            const response = await fetch(`/courses/${courseId}/quizzes/${quizId}/edit`, {
+                method: 'GET',
+                credentials: 'include',
+                headers: {
+                    'Accept': 'text/html'
+                }
+            });
+
+            if (response.ok) {
+                return await response.text();
+            }
+            return null;
+        } catch (error) {
+            debugLog(`Error fetching quiz edit HTML for ${quizId}:`, error);
+            return null;
+        }
+    }
+
+    // Utility function to get the course ID from the URL
+    function getCourseIdFromUrl() {
+        const url = window.location.href;
+        const match = url.match(/courses\/(\d+)/);
+        return match ? match[1] : null;
+    }
+
+    // Function to display usage info under each question bank
+    function displayBankUsageInfo(bankId, quizUsage) {
+        const bankElement = document.getElementById(`question_bank_${bankId}`);
+        if (bankElement) {
+            const contentDiv = bankElement.querySelector('.content');
+            if (!contentDiv) {
+                debugLog(`Could not find content div for bank ${bankId}`);
+                return;
+            }
+
+            // Remove existing usage info if already displayed
+            const existingInfo = bankElement.querySelector('.bank-usage-info');
+            if (existingInfo) {
+                existingInfo.remove();
+            }
+
+            // Create usage info element
+            const usageInfo = document.createElement('div');
+            usageInfo.className = 'bank-usage-info';
+            usageInfo.style.marginTop = '5px';
+            usageInfo.style.padding = '5px';
+            usageInfo.style.border = '1px solid #ddd';
+            usageInfo.style.borderRadius = '3px';
+            usageInfo.style.backgroundColor = '#f9f9f9';
+
+            // Add title
+            const title = document.createElement('div');
+            title.style.fontWeight = 'bold';
+            title.style.marginBottom = '3px';
+            title.textContent = 'Directly Linked In:';
+            usageInfo.appendChild(title);
+
+            // Add quiz list
+            if (quizUsage.length > 0) {
+                const list = document.createElement('ul');
+                list.style.margin = '0';
+                list.style.paddingLeft = '20px';
+
+                quizUsage.forEach(quiz => {
+                    const item = document.createElement('li');
+                    const link = document.createElement('a');
+                    link.href = `/courses/${getCourseIdFromUrl()}/quizzes/${quiz.id}`;
+                    link.textContent = quiz.title;
+                    link.style.color = '#0374B5';
+                    item.appendChild(link);
+                    list.appendChild(item);
+                });
+
+                usageInfo.appendChild(list);
+            } else {
+                const none = document.createElement('div');
+                none.style.color = '#c00';
+                none.style.fontStyle = 'italic';
+                none.textContent = 'No direct links found';
+                usageInfo.appendChild(none);
+
+                // Add note about possible "Find Questions" usage
+                const noteDiv = document.createElement('div');
+                noteDiv.style.fontSize = '0.85em';
+                noteDiv.style.marginTop = '3px';
+                noteDiv.style.color = '#666';
+                noteDiv.textContent = '(May still be used via "Find Questions")';
+                usageInfo.appendChild(noteDiv);
+            }
+
+            // Append to bank content
+            contentDiv.appendChild(usageInfo);
+        } else {
+            debugLog(`Could not find bank element for bank ${bankId}`);
+        }
+    }
+
+    // Function to check if a bank is used by a quiz based on HTML content
+    function checkBankUsedInQuizHTML(quizHtml, bankId) {
+        if (!quizHtml) return false;
+
+        // Look for various patterns that indicate a bank is linked to a quiz
+        const patterns = [
+            // Find bank ID in data attributes
+            new RegExp(`data-id=["']${bankId}["']`),
+            new RegExp(`data-bank-id=["']${bankId}["']`),
+            new RegExp(`data-bank_id=["']${bankId}["']`),
+            new RegExp(`data-question_bank_id=["']${bankId}["']`),
+
+            // Find bank ID in JavaScript objects
+            new RegExp(`bank_id\\s*:\\s*['"]?${bankId}['"]?\\b`),
+            new RegExp(`question_bank_id\\s*:\\s*['"]?${bankId}['"]?\\b`),
+            new RegExp(`assessment_question_bank_id\\s*:\\s*['"]?${bankId}['"]?\\b`),
+
+            // Find bank ID in HTML attributes
+            new RegExp(`bank-id=["']${bankId}["']`),
+            new RegExp(`bank_id=["']${bankId}["']`),
+
+            // Find references in URLs
+            new RegExp(`/assessment_question_banks/${bankId}\\b`),
+            new RegExp(`/question_banks/${bankId}\\b`)
+        ];
+
+        return patterns.some(pattern => pattern.test(quizHtml));
+    }
+
+    // Create and show loading indicator
+    function showLoadingIndicator() {
+        // Remove any existing loading indicator
+        const existingIndicator = document.getElementById('bank-usage-loading');
+        if (existingIndicator) {
+            existingIndicator.remove();
+        }
+
+        const loadingDiv = document.createElement('div');
+        loadingDiv.id = 'bank-usage-loading';
+        loadingDiv.style.position = 'fixed';
+        loadingDiv.style.top = '50%';
+        loadingDiv.style.left = '50%';
+        loadingDiv.style.transform = 'translate(-50%, -50%)';
+        loadingDiv.style.backgroundColor = 'rgba(255, 255, 255, 0.9)';
+        loadingDiv.style.padding = '20px';
+        loadingDiv.style.borderRadius = '5px';
+        loadingDiv.style.boxShadow = '0 0 10px rgba(0, 0, 0, 0.2)';
+        loadingDiv.style.zIndex = '9999';
+
+        const spinner = document.createElement('div');
+        spinner.style.border = '5px solid #f3f3f3';
+        spinner.style.borderTop = '5px solid #0374B5';
+        spinner.style.borderRadius = '50%';
+        spinner.style.width = '30px';
+        spinner.style.height = '30px';
+        spinner.style.animation = 'bank-usage-spin 2s linear infinite';
+        spinner.style.margin = '0 auto 10px auto';
+        loadingDiv.appendChild(spinner);
+
+        const loadingText = document.createElement('div');
+        loadingText.id = 'bank-usage-loading-text';
+        loadingText.textContent = 'Analyzing question banks usage...';
+        loadingText.style.textAlign = 'center';
+        loadingDiv.appendChild(loadingText);
+
+        document.body.appendChild(loadingDiv);
+
+        // Add the animation
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes bank-usage-spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+        `;
+        document.head.appendChild(style);
+
+        return loadingText;
+    }
+
+    // Hide loading indicator
+    function hideLoadingIndicator() {
+        const indicator = document.getElementById('bank-usage-loading');
+        if (indicator) {
+            indicator.remove();
+        }
+    }
+
+    // Create quiz list with direct edit links
+    function createQuizLinksList(quizzes) {
+        const courseId = getCourseIdFromUrl();
+
+        const quizLinksDiv = document.createElement('div');
+        quizLinksDiv.id = 'quiz-links-section';
+        quizLinksDiv.style.marginTop = '15px';
+        quizLinksDiv.style.padding = '10px';
+        quizLinksDiv.style.backgroundColor = '#f5f5f5';
+        quizLinksDiv.style.border = '1px solid #ddd';
+        quizLinksDiv.style.borderRadius = '3px';
+
+        const heading = document.createElement('h3');
+        heading.style.fontSize = '14px';
+        heading.style.marginTop = '0';
+        heading.style.marginBottom = '8px';
+        heading.style.color = '#0374B5';
+        heading.innerHTML = '🔗 All Quizzes (Questions Tab Links)';
+        quizLinksDiv.appendChild(heading);
+
+        const description = document.createElement('p');
+        description.style.fontSize = '12px';
+        description.style.margin = '0 0 10px 0';
+        description.textContent = 'Click any link below to open the quiz directly to its questions tab.';
+        quizLinksDiv.appendChild(description);
+
+        // Sort quizzes alphabetically
+        const sortedQuizzes = [...quizzes].sort((a, b) => a.title.localeCompare(b.title));
+
+        if (sortedQuizzes.length > 0) {
+            const list = document.createElement('ul');
+            list.style.margin = '0';
+            list.style.paddingLeft = '20px';
+            list.style.columnCount = sortedQuizzes.length > 10 ? '2' : '1';
+
+            sortedQuizzes.forEach(quiz => {
+                const item = document.createElement('li');
+                item.style.marginBottom = '5px';
+
+                const link = document.createElement('a');
+                link.href = `/courses/${courseId}/quizzes/${quiz.id}/edit#questions_tab`;
+                link.textContent = quiz.title;
+                link.style.color = '#0374B5';
+                link.title = `Open questions tab for: ${quiz.title}`;
+                link.target = '_blank';
+
+                item.appendChild(link);
+                list.appendChild(item);
+            });
+
+            quizLinksDiv.appendChild(list);
+        } else {
+            const none = document.createElement('div');
+            none.style.fontStyle = 'italic';
+            none.textContent = 'No quizzes found in this course.';
+            quizLinksDiv.appendChild(none);
+        }
+
+        return quizLinksDiv;
+    }
+
+    // Display the limitations disclaimer and quiz links
+    function showLimitationsDisclaimer(quizzes) {
+        // Remove any existing disclaimer
+        const existingDisclaimer = document.getElementById('bank-usage-limitations');
+        if (existingDisclaimer) {
+            existingDisclaimer.remove();
+        }
+
+        // Create the container for both sections
+        const container = document.createElement('div');
+        container.id = 'bank-usage-info-container';
+        container.style.marginBottom = '20px';
+
+        // Create the limitations disclaimer
+        const disclaimerDiv = document.createElement('div');
+        disclaimerDiv.id = 'bank-usage-limitations';
+        disclaimerDiv.style.padding = '10px';
+        disclaimerDiv.style.backgroundColor = '#FFF8DC';
+        disclaimerDiv.style.border = '1px solid #FFD700';
+        disclaimerDiv.style.borderRadius = '3px';
+        disclaimerDiv.style.fontSize = '0.9em';
+
+        const heading = document.createElement('div');
+        heading.style.fontWeight = 'bold';
+        heading.style.marginBottom = '5px';
+        heading.style.color = '#333';
+        heading.textContent = '⚠️ Important Limitations of This Tool';
+        disclaimerDiv.appendChild(heading);
+
+        const list = document.createElement('ul');
+        list.style.margin = '0';
+        list.style.paddingLeft = '20px';
+
+        const limitations = [
+            'This tool only detects question banks <strong>directly linked</strong> to quizzes.',
+            'Banks used through the "Find Questions" feature are <strong>not detected</strong>.',
+            'Questions created within a quiz or in "unfiled questions" are <strong>not detected</strong>.',
+            'A bank showing "No direct links found" may still be in use through other methods.'
+        ];
+
+        limitations.forEach(text => {
+            const item = document.createElement('li');
+            item.style.marginBottom = '3px';
+            item.innerHTML = text;
+            list.appendChild(item);
+        });
+
+        disclaimerDiv.appendChild(list);
+
+        const warning = document.createElement('div');
+        warning.style.marginTop = '8px';
+        warning.style.color = '#D70000';
+        warning.style.fontWeight = 'bold';
+        warning.textContent = 'Do not delete banks solely based on these results!';
+        disclaimerDiv.appendChild(warning);
+
+        // Add disclaimer to the container
+        container.appendChild(disclaimerDiv);
+
+        // Add the quiz links section below the disclaimer
+        container.appendChild(createQuizLinksList(quizzes));
+
+        // Insert the container at the top of the main content area
+        const contentArea = document.querySelector('#content');
+        if (contentArea && contentArea.firstChild) {
+            contentArea.insertBefore(container, contentArea.firstChild);
+        } else {
+            // Fallback
+            const header = document.querySelector('.quiz-header');
+            if (header) {
+                header.after(container);
+            }
+        }
+
+        return container;
+    }
+
+    // Main function to analyze and display bank usage
+    async function analyzeBankUsage() {
+        const button = document.getElementById('bank-usage-button');
+        if (button) {
+            button.style.pointerEvents = 'none';
+            button.style.opacity = '0.6';
+            button.innerHTML = '⚡Analyzing...';
+        }
+
+        // Show loading indicator
+        const loadingText = showLoadingIndicator();
+
+        debugLog('Starting bank usage analysis');
+
+        const courseId = getCourseIdFromUrl();
+        if (!courseId) {
+            console.error('Could not determine course ID');
+            hideLoadingIndicator();
+            if (button) {
+                button.style.pointerEvents = '';
+                button.style.opacity = '';
+                button.innerHTML = '⚡Audit Bank Usage';
+            }
+            return;
+        }
+
+        debugLog(`Course ID: ${courseId}`);
+
+        try {
+            // Get all question banks from the page
+            const banks = [];
+            document.querySelectorAll('.question_bank').forEach(bankElement => {
+                if (bankElement.id && bankElement.id !== 'question_bank_blank') {
+                    const bankId = bankElement.id.replace('question_bank_', '');
+                    const titleElement = bankElement.querySelector('.title');
+                    const bankName = titleElement ? titleElement.textContent.trim() : `Bank ${bankId}`;
+                    banks.push({ id: bankId, name: bankName });
+                }
+            });
+
+            debugLog(`Found ${banks.length} question banks on the page`, banks);
+
+            if (banks.length === 0) {
+                hideLoadingIndicator();
+                alert('No question banks found on this page.');
+                if (button) {
+                    button.style.pointerEvents = '';
+                    button.style.opacity = '';
+                    button.innerHTML = '⚡Audit Bank Usage';
+                }
+                return;
+            }
+
+            // Get all quizzes
+            const quizzes = await getAllQuizzes(courseId);
+
+            // Map to store which quizzes use which banks
+            const bankUsage = {};
+            banks.forEach(bank => {
+                bankUsage[bank.id] = [];
+            });
+
+            // Process each quiz to check for bank usage
+            for (let i = 0; i < quizzes.length; i++) {
+                const quiz = quizzes[i];
+                loadingText.textContent = `Analyzing quiz ${i+1} of ${quizzes.length}: ${quiz.title}`;
+
+                debugLog(`Processing quiz: ${quiz.title} (${i+1}/${quizzes.length})`);
+
+                try {
+                    // First try to get the quiz edit page which is more likely to have bank info
+                    const quizEditHtml = await getQuizEditHTML(courseId, quiz.id);
+
+                    // If that fails, try the regular quiz page
+                    const quizHtml = quizEditHtml || await getQuizHTML(courseId, quiz.id);
+
+                    if (quizHtml) {
+                        // Check each bank to see if it's used in this quiz
+                        for (const bank of banks) {
+                            if (checkBankUsedInQuizHTML(quizHtml, bank.id)) {
+                                debugLog(`Found bank ${bank.id} used in quiz ${quiz.id}`);
+
+                                // Add this quiz to the bank's usage list if not already there
+                                if (!bankUsage[bank.id].some(q => q.id === quiz.id)) {
+                                    bankUsage[bank.id].push({
+                                        id: quiz.id,
+                                        title: quiz.title
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // Small delay to avoid rate limiting
+                    await new Promise(resolve => setTimeout(resolve, 100));
+
+                } catch (error) {
+                    debugLog(`Error processing quiz ${quiz.id}:`, error);
+                }
+            }
+
+            // Hide loading indicator
+            hideLoadingIndicator();
+
+            // Show limitations disclaimer and quiz links
+            showLimitationsDisclaimer(quizzes);
+
+            debugLog('Final bank usage mapping', bankUsage);
+
+            // Display usage info for each bank
+            banks.forEach(bank => {
+                displayBankUsageInfo(bank.id, bankUsage[bank.id] || []);
+            });
+
+            // Update button state
+            if (button) {
+                button.style.pointerEvents = '';
+                button.style.opacity = '';
+                button.innerHTML = '⚡Audit Bank Usage';
+            }
+
+        } catch (error) {
+            debugLog('Error analyzing bank usage:', error);
+            hideLoadingIndicator();
+            alert('An error occurred while analyzing question bank usage. Check the console for details.');
+            if (button) {
+                button.style.pointerEvents = '';
+                button.style.opacity = '';
+                button.innerHTML = '⚡Audit Bank Usage';
+            }
+        }
+    }
+
+    // Function to create the button
+    function createButton() {
+        // Prevent duplicate buttons
+        const existingButton = document.getElementById('bank-usage-button');
+        if (existingButton) {
+            return;
+        }
+
+        // Create button with consistent styling
+        const button = document.createElement('a');
+        button.href = '#';
+        button.className = 'btn button-sidebar-wide';
+        button.id = 'bank-usage-button';
+        button.innerHTML = '⚡Audit Bank Usage';
+        button.style = 'margin-bottom: 10px; border: 2px solid #0374B5; transition: background-color 0.2s ease;';
+
+        // Add hover effect
+        button.addEventListener('mouseenter', function() {
+            this.style.setProperty('background-color', '#e8e8e8', 'important');
+        });
+        button.addEventListener('mouseleave', function() {
+            this.style.setProperty('background-color', '', '');
+        });
+
+        button.addEventListener('click', function(e) {
+            e.preventDefault();
+            analyzeBankUsage();
+        });
+
+        // Add the button to the sidebar
+        const sidebar = document.querySelector('#right-side');
+        if (sidebar) {
+            sidebar.appendChild(button);
+        } else {
+            // Fallback - Add the button to the page
+            const container = document.querySelector('.quiz-header');
+            if (container) {
+                container.after(button);
+            }
+        }
+    }
+
+    // Function to wait for elements to be available
+    function waitForElement(selector, callback, maxAttempts = 50) {
+        let attempts = 0;
+
+        function check() {
+            attempts++;
+            const element = document.querySelector(selector);
+
+            if (element) {
+                callback();
+                return;
+            }
+
+            if (attempts < maxAttempts) {
+                setTimeout(check, 200);
+            } else {
+                console.warn('[Bank Usage] Could not find target element, trying fallback');
+                callback();
+            }
+        }
+
+        check();
+    }
+
+    // Enhanced initialization function
+    function initializeScript() {
+        // Only run on question banks pages
+        if (!window.location.href.includes('/question_banks')) {
+            return;
+        }
+
+        // Wait for either the sidebar or main content to be ready
+        waitForElement('#right-side, #content', createButton);
+    }
+
+    // Multiple event listeners to catch different loading states
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initializeScript);
+    } else {
+        initializeScript();
+    }
+
+    window.addEventListener('load', initializeScript);
+
+    // Additional retry after 2 seconds if button hasn't loaded
+    setTimeout(function() {
+        if (!document.getElementById('bank-usage-button') && window.location.href.includes('/question_banks')) {
+            console.log('[Bank Usage] Button not found after 2s, retrying...');
+            initializeScript();
+        }
+    }, 2000);
+
+    // Watch for navigation changes in Canvas
+    let lastUrl = location.href;
+    new MutationObserver(() => {
+        const url = location.href;
+        if (url !== lastUrl) {
+            lastUrl = url;
+            if (url.includes('/question_banks')) {
+                setTimeout(initializeScript, 1000);
+            }
+        }
+    }).observe(document, { subtree: true, childList: true });
+})();
