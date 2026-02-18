@@ -1,0 +1,284 @@
+// ==UserScript==
+// @name         Canvas | All Courses | Scripts Master Panel [SMP]
+// @version      1.5
+// @description  Central hub for all Canvas userscripts with a side panel interface
+// @author       Alex & Claude
+// @match        https://*.instructure.com/courses
+// @grant        none
+// @run-at       document-start
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Initialize the global registration system
+    window.canvasScriptPanel = {
+        scripts: [],
+        isReady: false,
+        register: function(scriptConfig) {
+            if (this.scripts.some(s => s.id === scriptConfig.id)) {
+                console.warn(`Canvas SMP: Script "${scriptConfig.id}" is already registered. Skipping.`);
+                return;
+            }
+            this.scripts.push(scriptConfig);
+            // If panel is already initialized, refresh it
+            if (this.isReady) {
+                refreshScriptList();
+            }
+        }
+    };
+
+    let panelOpen = false;
+
+    function createMasterButton() {
+        const button = document.createElement('a');
+        button.href = '#';
+        button.className = 'btn button-sidebar-wide';
+        button.id = 'canvas-scripts-panel-btn';
+        button.innerHTML = '⚡ Scripts';
+        button.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 10000;
+            margin-bottom: 10px;
+            border: 2px solid #112d54;
+            transition: background-color 0.2s ease;
+        `;
+
+        button.addEventListener('mouseenter', function() {
+            this.style.setProperty('background-color', '#e8e8e8', 'important');
+        });
+        button.addEventListener('mouseleave', function() {
+            this.style.setProperty('background-color', '', '');
+        });
+        button.onclick = (e) => {
+            e.preventDefault();
+            togglePanel();
+        };
+        document.body.appendChild(button);
+    }
+
+    function createSidePanel() {
+        const panel = document.createElement('div');
+        panel.id = 'canvas-scripts-panel';
+        panel.style.cssText = `
+            position: fixed;
+            top: 0;
+            right: -550px;
+            width: 500px;
+            height: 100%;
+            background: white;
+            box-shadow: -4px 0 16px rgba(0,0,0,0.2);
+            z-index: 10001;
+            transition: right 0.3s ease;
+            overflow-y: auto;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        `;
+
+        panel.innerHTML = `
+            <div style="position: sticky; top: 0; background: #112d54; color: white; padding: 20px; z-index: 1; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <h2 style="margin: 0; font-size: 20px; font-weight: 600;">Canvas Scripts</h2>
+                    <button id="close-panel" style="background: none; border: none; color: white; font-size: 28px; cursor: pointer; padding: 0; line-height: 1;">&times;</button>
+                </div>
+                <p style="margin: 10px 0 0 0; font-size: 13px; opacity: 0.9;">Powerful tools for Canvas management</p>
+            </div>
+            <div id="scripts-container" style="padding: 20px;">
+                <div style="text-align: center; color: #666; padding: 40px 20px;">
+                    <p style="font-size: 14px; margin: 0;">No scripts registered yet...</p>
+                    <p style="font-size: 12px; margin: 10px 0 0 0; opacity: 0.7;">Scripts will appear here as they load</p>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(panel);
+
+        // Close button handler
+        document.getElementById('close-panel').onclick = closePanel;
+
+        // Close on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && panelOpen) {
+                closePanel();
+            }
+        });
+    }
+
+    function refreshScriptList() {
+        const container = document.getElementById('scripts-container');
+        if (!container) return;
+
+        if (window.canvasScriptPanel.scripts.length === 0) {
+            container.innerHTML = `
+                <div style="text-align: center; color: #666; padding: 40px 20px;">
+                    <p style="font-size: 14px; margin: 0;">No scripts registered yet...</p>
+                    <p style="font-size: 12px; margin: 10px 0 0 0; opacity: 0.7;">Scripts will appear here as they load</p>
+                </div>
+            `;
+            return;
+        }
+
+        // Group scripts by category
+        const categories = {};
+        window.canvasScriptPanel.scripts.forEach(script => {
+            const cat = script.category || 'Other';
+            if (!categories[cat]) categories[cat] = [];
+            categories[cat].push(script);
+        });
+
+        // Sort scripts alphabetically within each category
+        Object.keys(categories).forEach(category => {
+            categories[category].sort((a, b) => {
+                const nameA = a.name.toLowerCase();
+                const nameB = b.name.toLowerCase();
+                return nameA.localeCompare(nameB);
+            });
+        });
+
+        let html = '';
+
+        // Render each category
+        Object.keys(categories).sort().forEach(category => {
+            html += `
+                <div style="margin-bottom: 30px;">
+                    <h3 style="font-size: 14px; font-weight: 600; color: #2D3B45; margin: 0 0 12px 0; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.7;">
+                        ${category}
+                    </h3>
+            `;
+
+            categories[category].forEach(script => {
+                html += `
+                    <div style="background: #F7F9FA; border-radius: 6px; padding: 12px; margin-bottom: 10px; border-left: 3px solid #b6862c;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <h4 style="margin: 0; font-size: 14px; font-weight: 600; color: #2D3B45; flex: 1;">
+                                ${script.icon || '📄'} ${script.name}
+                            </h4>
+                            ${script.description ? `
+                                <button
+                                    class="info-toggle-btn"
+                                    data-info-script-id="${script.id}"
+                                    style="background: none; border: none; color: #666; cursor: pointer; padding: 4px 8px; font-size: 16px; line-height: 1;"
+                                    title="Show/hide description">
+                                    ℹ️
+                                </button>
+                            ` : ''}
+                        </div>
+                        ${script.description ? `
+                            <div class="script-description" id="desc-${script.id}" style="display: none; margin-bottom: 8px; padding: 8px; background: white; border-radius: 4px; font-size: 12px; color: #666; line-height: 1.4;">
+                                ${script.description}
+                            </div>
+                        ` : ''}
+                        <button
+                            class="script-action-btn"
+                            data-script-id="${script.id}"
+                            style="width: 100%; padding: 8px 12px; background: #112d54; color: white; border: none; border-radius: 4px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s ease;">
+                            ${script.buttonText || 'Open'}
+                        </button>
+                    </div>
+                `;
+            });
+
+            html += `</div>`;
+        });
+
+        container.innerHTML = html;
+
+        // Add event listeners to info toggle buttons
+        document.querySelectorAll('.info-toggle-btn').forEach(btn => {
+            btn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                const scriptId = this.getAttribute('data-info-script-id');
+                const descElement = document.getElementById(`desc-${scriptId}`);
+                if (descElement) {
+                    if (descElement.style.display === 'none') {
+                        descElement.style.display = 'block';
+                        this.style.color = '#b6862c';
+                    } else {
+                        descElement.style.display = 'none';
+                        this.style.color = '#666';
+                    }
+                }
+            });
+        });
+
+        // Add event listeners to all action buttons
+        document.querySelectorAll('.script-action-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const scriptId = this.getAttribute('data-script-id');
+                const script = window.canvasScriptPanel.scripts.find(s => s.id === scriptId);
+                if (script && script.action) {
+                    try {
+                        // Execute the action
+                        script.action();
+                        // Only close panel if closeAfterAction is explicitly true
+                        if (script.closeAfterAction === true) {
+                            closePanel();
+                        }
+                        // Otherwise panel stays open (default behavior)
+                    } catch (error) {
+                        console.error(`Error executing script "${script.name}":`, error);
+                        alert(`Error running ${script.name}. Check console for details.`);
+                    }
+                }
+            });
+
+            // Add hover effects
+            btn.addEventListener('mouseenter', function() {
+                this.style.background = '#0d2340';
+                this.style.transform = 'translateY(-1px)';
+                this.style.boxShadow = '0 2px 8px rgba(17,45,84,0.3)';
+            });
+            btn.addEventListener('mouseleave', function() {
+                this.style.background = '#112d54';
+                this.style.transform = 'translateY(0)';
+                this.style.boxShadow = 'none';
+            });
+        });
+    }
+
+    function togglePanel() {
+        if (panelOpen) {
+            closePanel();
+        } else {
+            openPanel();
+        }
+    }
+
+    function openPanel() {
+        const panel = document.getElementById('canvas-scripts-panel');
+        if (panel) {
+            panel.style.right = '0';
+            panelOpen = true;
+            refreshScriptList();
+        }
+    }
+
+    function closePanel() {
+        const panel = document.getElementById('canvas-scripts-panel');
+        if (panel) {
+            const offset = panel.offsetWidth + 20; // extra 20px to hide box-shadow
+            panel.style.right = `-${offset}px`;
+            panelOpen = false;
+        }
+    }
+
+    function init() {
+        createMasterButton();
+        createSidePanel();
+        window.canvasScriptPanel.isReady = true;
+
+        // Refresh list after a short delay to catch any late-loading scripts
+        setTimeout(() => {
+            refreshScriptList();
+        }, 1000);
+    }
+
+    // Wait for page to load
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+})();
