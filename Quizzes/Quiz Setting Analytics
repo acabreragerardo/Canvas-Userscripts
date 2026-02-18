@@ -1,0 +1,633 @@
+// ==UserScript==
+// @name         Canvas | Quizzes | Quiz Setting Analytics
+// @namespace    http://tampermonkey.net/
+// @version      2.1
+// @description  Display a summary of all quiz settings in a Canvas course with tabbed interface
+// @match        https://*.instructure.com/courses/*/quizzes
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Extract course ID from URL
+    const courseId = window.location.pathname.match(/\/courses\/(\d+)/)?.[1];
+    if (!courseId) return;
+
+    let currentQuizzes = [];
+    let assignmentGroups = {};
+    let currentTab = 'basic'; // 'basic', 'visibility', or 'security'
+    let sortColumn = 'title';
+    let sortDirection = 'asc';
+    let sortState = {
+        basic: { column: 'title', direction: 'asc' },
+        visibility: { column: 'due_date', direction: 'desc' },
+        security: { column: 'title', direction: 'asc' }
+    };
+
+    // Wait for the target container to load
+    function addButton() {
+        const crumbsContainer = document.querySelector('div.right-of-crumbs');
+        if (!crumbsContainer) {
+            setTimeout(addButton, 100);
+            return;
+        }
+
+        // Create button with Canvas styling matching the sidebar style
+        const button = document.createElement('button');
+        button.className = 'btn';
+        button.innerHTML = '⚡Quiz Settings Analytics';
+        button.title = 'View Quiz Settings Summary';
+        button.setAttribute('aria-label', 'View Quiz Settings Summary');
+        button.style.cssText = 'margin-left: 10px; border: 2px solid #0374B5; transition: background-color 0.2s ease; cursor: pointer;';
+
+        // Add hover effect
+        button.addEventListener('mouseenter', function() {
+            this.style.setProperty('background-color', '#e8e8e8', 'important');
+        });
+        button.addEventListener('mouseleave', function() {
+            this.style.setProperty('background-color', '', '');
+        });
+
+        // Append to the end of the crumbs container
+        crumbsContainer.appendChild(button);
+
+        button.onclick = fetchQuizzes;
+    }
+
+    addButton();
+
+    // Create modal
+    const modal = document.createElement('div');
+    modal.style.cssText = `
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0,0,0,0.5);
+        z-index: 10001;
+        overflow: auto;
+    `;
+
+    const modalContent = document.createElement('div');
+    modalContent.style.cssText = `
+        background: white;
+        margin: 40px auto;
+        padding: 20px;
+        width: 95%;
+        max-width: 1600px;
+        border-radius: 8px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+    `;
+
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '× Close';
+    closeBtn.style.cssText = `
+        float: right;
+        background: #dc3545;
+        color: white;
+        border: none;
+        padding: 8px 16px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 16px;
+        font-weight: bold;
+    `;
+    closeBtn.addEventListener('mouseenter', () => closeBtn.style.background = '#c82333');
+    closeBtn.addEventListener('mouseleave', () => closeBtn.style.background = '#dc3545');
+    closeBtn.onclick = () => modal.style.display = 'none';
+
+    const title = document.createElement('h2');
+    title.textContent = 'Quiz Settings Summary (Graded Quizzes Only)';
+    title.style.marginTop = '0';
+
+    const contentArea = document.createElement('div');
+    contentArea.id = 'quiz-summary-content';
+
+    modalContent.appendChild(closeBtn);
+    modalContent.appendChild(title);
+    modalContent.appendChild(contentArea);
+    modal.appendChild(modalContent);
+    document.body.appendChild(modal);
+
+    // Add ESC key handler to close modal
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && modal.style.display === 'block') {
+            modal.style.display = 'none';
+        }
+    });
+
+    // Function to fetch assignment groups
+    async function fetchAssignmentGroups() {
+        try {
+            const response = await fetch(`/api/v1/courses/${courseId}/assignment_groups`, {
+                headers: {
+                    'Accept': 'application/json'
+                }
+            });
+
+            if (!response.ok) {
+                return {};
+            }
+
+            const groups = await response.json();
+            const groupMap = {};
+            groups.forEach(group => {
+                groupMap[group.id] = group.name;
+            });
+            return groupMap;
+        } catch (error) {
+            console.error('Error fetching assignment groups:', error);
+            return {};
+        }
+    }
+
+    // Function to fetch all quizzes
+    async function fetchQuizzes() {
+        contentArea.innerHTML = '<p>Loading quizzes...</p>';
+        modal.style.display = 'block';
+
+        try {
+            // Fetch assignment groups first
+            assignmentGroups = await fetchAssignmentGroups();
+
+            let allQuizzes = [];
+            let page = 1;
+            let hasMore = true;
+
+            while (hasMore) {
+                const response = await fetch(`/api/v1/courses/${courseId}/quizzes?per_page=100&page=${page}`, {
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch quizzes: ${response.status}`);
+                }
+
+                const quizzes = await response.json();
+                allQuizzes = allQuizzes.concat(quizzes);
+
+                // Check if there are more pages
+                const linkHeader = response.headers.get('Link');
+                hasMore = linkHeader && linkHeader.includes('rel="next"');
+                page++;
+            }
+
+            // Filter to only graded quizzes
+            currentQuizzes = allQuizzes.filter(quiz => quiz.quiz_type === 'assignment');
+
+            // Set initial sort based on default tab
+            currentTab = 'basic';
+            sortColumn = sortState[currentTab].column;
+            sortDirection = sortState[currentTab].direction;
+            sortQuizzes(sortColumn);
+        } catch (error) {
+            contentArea.innerHTML = `<p style="color: red;">Error loading quizzes: ${error.message}</p>`;
+        }
+    }
+
+    // Function to switch tabs
+    function switchTab(tab) {
+        currentTab = tab;
+        // Restore sort state for this tab
+        sortColumn = sortState[tab].column;
+        sortDirection = sortState[tab].direction;
+        displayQuizzes();
+    }
+
+    // Function to sort quizzes
+    function sortQuizzes(column) {
+        if (sortColumn === column) {
+            sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+        } else {
+            sortColumn = column;
+            sortDirection = 'asc';
+        }
+
+        // Save sort state for current tab
+        sortState[currentTab] = { column: sortColumn, direction: sortDirection };
+
+        currentQuizzes.sort((a, b) => {
+            let valA, valB;
+
+            switch(column) {
+                case 'title':
+                    valA = a.title.toLowerCase();
+                    valB = b.title.toLowerCase();
+                    break;
+                case 'assignment_group':
+                    valA = (assignmentGroups[a.assignment_group_id] || 'Unknown').toLowerCase();
+                    valB = (assignmentGroups[b.assignment_group_id] || 'Unknown').toLowerCase();
+                    break;
+                case 'published':
+                    valA = a.published ? 1 : 0;
+                    valB = b.published ? 1 : 0;
+                    break;
+                case 'time_limit':
+                    valA = a.time_limit || 0;
+                    valB = b.time_limit || 0;
+                    break;
+                case 'attempts':
+                    valA = a.allowed_attempts === -1 ? 999999 : (a.allowed_attempts || 1);
+                    valB = b.allowed_attempts === -1 ? 999999 : (b.allowed_attempts || 1);
+                    break;
+                case 'scoring':
+                    valA = a.scoring_policy || 'keep_highest';
+                    valB = b.scoring_policy || 'keep_highest';
+                    break;
+                case 'shuffle':
+                    valA = a.shuffle_answers ? 1 : 0;
+                    valB = b.shuffle_answers ? 1 : 0;
+                    break;
+                case 'one_at_time':
+                    // Sort by: locked (2) > unlocked one-at-time (1) > no one-at-time (0)
+                    valA = a.one_question_at_a_time ? (a.cant_go_back ? 2 : 1) : 0;
+                    valB = b.one_question_at_a_time ? (b.cant_go_back ? 2 : 1) : 0;
+                    break;
+                case 'questions':
+                    valA = a.question_count || 0;
+                    valB = b.question_count || 0;
+                    break;
+                case 'points':
+                    valA = a.points_possible || 0;
+                    valB = b.points_possible || 0;
+                    break;
+                case 'due_date':
+                    valA = a.due_at ? new Date(a.due_at).getTime() : 0;
+                    valB = b.due_at ? new Date(b.due_at).getTime() : 0;
+                    break;
+                case 'unlock_at':
+                    valA = a.unlock_at ? new Date(a.unlock_at).getTime() : 0;
+                    valB = b.unlock_at ? new Date(b.unlock_at).getTime() : 0;
+                    break;
+                case 'lock_at':
+                    valA = a.lock_at ? new Date(a.lock_at).getTime() : 0;
+                    valB = b.lock_at ? new Date(b.lock_at).getTime() : 0;
+                    break;
+                case 'show_responses':
+                    const hideA = a.hide_results || 'no';
+                    const hideB = b.hide_results || 'no';
+                    valA = hideA === 'always' ? 0 : (hideA === 'until_after_last_attempt' ? 1 : 2);
+                    valB = hideB === 'always' ? 0 : (hideB === 'until_after_last_attempt' ? 1 : 2);
+                    break;
+                case 'show_correct':
+                    valA = a.show_correct_answers ? 1 : 0;
+                    valB = b.show_correct_answers ? 1 : 0;
+                    break;
+                case 'show_after':
+                    valA = a.show_correct_answers_at ? new Date(a.show_correct_answers_at).getTime() : 0;
+                    valB = b.show_correct_answers_at ? new Date(b.show_correct_answers_at).getTime() : 0;
+                    break;
+                case 'hide_after':
+                    valA = a.hide_correct_answers_at ? new Date(a.hide_correct_answers_at).getTime() : 0;
+                    valB = b.hide_correct_answers_at ? new Date(b.hide_correct_answers_at).getTime() : 0;
+                    break;
+                case 'last_attempt':
+                    valA = a.show_correct_answers_last_attempt ? 1 : 0;
+                    valB = b.show_correct_answers_last_attempt ? 1 : 0;
+                    break;
+                case 'access_code':
+                    valA = a.access_code ? 1 : 0;
+                    valB = b.access_code ? 1 : 0;
+                    break;
+                case 'ip_filter':
+                    valA = a.ip_filter ? 1 : 0;
+                    valB = b.ip_filter ? 1 : 0;
+                    break;
+                case 'lockdown_view_results':
+                    valA = a.require_lockdown_browser_for_results ? 1 : 0;
+                    valB = b.require_lockdown_browser_for_results ? 1 : 0;
+                    break;
+                case 'proctoring':
+                    // Sort order: Both (3) > Lockdown (2) > Honorlock (1) > None (0)
+                    const hasLockdownA = a.require_lockdown_browser || false;
+                    const hasHonorlockA = a.access_code && a.access_code.startsWith('HL_NO_EDIT_');
+                    const hasLockdownB = b.require_lockdown_browser || false;
+                    const hasHonorlockB = b.access_code && b.access_code.startsWith('HL_NO_EDIT_');
+
+                    valA = (hasLockdownA && hasHonorlockA) ? 3 : (hasLockdownA ? 2 : (hasHonorlockA ? 1 : 0));
+                    valB = (hasLockdownB && hasHonorlockB) ? 3 : (hasLockdownB ? 2 : (hasHonorlockB ? 1 : 0));
+                    break;
+                default:
+                    return 0;
+            }
+
+            if (valA < valB) return sortDirection === 'asc' ? -1 : 1;
+            if (valA > valB) return sortDirection === 'asc' ? 1 : -1;
+            return 0;
+        });
+
+        displayQuizzes();
+    }
+
+    // Function to create sortable header
+    function createSortableHeader(text, column) {
+        const arrow = sortColumn === column ? (sortDirection === 'asc' ? ' ▲' : ' ▼') : '';
+        return `<th style="padding: 10px; text-align: left; border: 1px solid #ddd; cursor: pointer; user-select: none;" data-column="${column}">
+            ${text}${arrow}
+        </th>`;
+    }
+
+    // Function to display quizzes in a table
+    function displayQuizzes() {
+        if (currentQuizzes.length === 0) {
+            contentArea.innerHTML = '<p>No graded quizzes found in this course.</p>';
+            return;
+        }
+
+        contentArea.innerHTML = '';
+
+        // Add tab navigation
+        const tabContainer = document.createElement('div');
+        tabContainer.style.cssText = 'margin-bottom: 15px; border-bottom: 2px solid #ddd;';
+
+        const tabs = [
+            { id: 'basic', label: 'Basic Settings' },
+            { id: 'visibility', label: 'Visibility & Scheduling' },
+            { id: 'security', label: 'Security' }
+        ];
+
+        tabs.forEach(tab => {
+            const tabBtn = document.createElement('button');
+            tabBtn.textContent = tab.label;
+            tabBtn.style.cssText = `
+                padding: 10px 20px;
+                border: none;
+                background: ${currentTab === tab.id ? '#0374B5' : '#f5f5f5'};
+                color: ${currentTab === tab.id ? 'white' : '#333'};
+                cursor: pointer;
+                margin-right: 5px;
+                border-radius: 4px 4px 0 0;
+                font-weight: ${currentTab === tab.id ? 'bold' : 'normal'};
+                transition: background-color 0.2s;
+            `;
+
+            if (currentTab !== tab.id) {
+                tabBtn.addEventListener('mouseenter', function() {
+                    this.style.background = '#e0e0e0';
+                });
+                tabBtn.addEventListener('mouseleave', function() {
+                    this.style.background = '#f5f5f5';
+                });
+            }
+
+            tabBtn.onclick = () => switchTab(tab.id);
+            tabContainer.appendChild(tabBtn);
+        });
+
+        contentArea.appendChild(tabContainer);
+
+        // Add sorting info message
+        const infoMessage = document.createElement('div');
+        infoMessage.style.cssText = 'margin-bottom: 10px; font-size: 13px; color: #666; font-style: italic;';
+        infoMessage.textContent = '💡 Click column headers to sort. Click again to reverse sort order.';
+        contentArea.appendChild(infoMessage);
+
+        // Create table wrapper for horizontal scrolling
+        const tableWrapper = document.createElement('div');
+        tableWrapper.style.cssText = 'overflow-x: auto;';
+
+        const table = document.createElement('table');
+        table.style.cssText = `
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        `;
+
+        const thead = document.createElement('thead');
+
+        if (currentTab === 'basic') {
+            thead.innerHTML = `
+                <tr style="background: #f5f5f5; border-bottom: 2px solid #ddd;">
+                    ${createSortableHeader('Quiz Title', 'title')}
+                    ${createSortableHeader('Assignment Group', 'assignment_group')}
+                    ${createSortableHeader('Published', 'published')}
+                    ${createSortableHeader('Time Limit', 'time_limit')}
+                    ${createSortableHeader('# of Attempts', 'attempts')}
+                    ${createSortableHeader('Scoring', 'scoring')}
+                    ${createSortableHeader('Shuffle Answers', 'shuffle')}
+                    ${createSortableHeader('# of Questions', 'questions')}
+                    ${createSortableHeader('Points', 'points')}
+                </tr>
+            `;
+        } else if (currentTab === 'visibility') {
+            thead.innerHTML = `
+                <tr style="background: #f5f5f5; border-bottom: 2px solid #ddd;">
+                    ${createSortableHeader('Quiz Title', 'title')}
+                    ${createSortableHeader('Due Date', 'due_date')}
+                    ${createSortableHeader('Available From', 'unlock_at')}
+                    ${createSortableHeader('Available Until', 'lock_at')}
+                    ${createSortableHeader('Show Responses', 'show_responses')}
+                    ${createSortableHeader('Show Correct', 'show_correct')}
+                    ${createSortableHeader('Show After', 'show_after')}
+                    ${createSortableHeader('Hide After', 'hide_after')}
+                    ${createSortableHeader('Last Attempt Only', 'last_attempt')}
+                </tr>
+            `;
+        } else if (currentTab === 'security') {
+            thead.innerHTML = `
+                <tr style="background: #f5f5f5; border-bottom: 2px solid #ddd;">
+                    ${createSortableHeader('Quiz Title', 'title')}
+                    ${createSortableHeader('One Question at a Time', 'one_at_time')}
+                    ${createSortableHeader('Access Code Required', 'access_code')}
+                    ${createSortableHeader('IP Filtering', 'ip_filter')}
+                    ${createSortableHeader('Proctoring', 'proctoring')}
+                    ${createSortableHeader('LockDown for Results', 'lockdown_view_results')}
+                </tr>
+            `;
+        }
+
+        table.appendChild(thead);
+
+        // Add click handlers to headers
+        thead.querySelectorAll('th[data-column]').forEach(th => {
+            th.onclick = () => sortQuizzes(th.dataset.column);
+        });
+
+        const tbody = document.createElement('tbody');
+        currentQuizzes.forEach((quiz, index) => {
+            const row = document.createElement('tr');
+            row.style.cssText = `
+                border-bottom: 1px solid #ddd;
+                background: ${index % 2 === 0 ? 'white' : '#f9f9f9'};
+            `;
+
+            if (currentTab === 'basic') {
+                // Determine scoring policy text
+                let scoringPolicy = 'N/A';
+                const attempts = quiz.allowed_attempts === -1 ? Infinity : (quiz.allowed_attempts || 1);
+                if (attempts > 1) {
+                    let policy = quiz.scoring_policy || 'keep_highest';
+                    policy = policy.replace('keep_', '').replace('_', ' ');
+                    scoringPolicy = policy.charAt(0).toUpperCase() + policy.slice(1);
+                }
+
+                // Get assignment group name
+                const groupName = assignmentGroups[quiz.assignment_group_id] || 'Unknown';
+
+                row.innerHTML = `
+                    <td style="padding: 10px; border: 1px solid #ddd;">
+                        <a href="/courses/${courseId}/quizzes/${quiz.id}/edit" target="_blank" style="color: #0374B5; text-decoration: none;">
+                            ${quiz.title}
+                        </a>
+                    </td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">${groupName}</td>
+                    <td style="padding: 10px; border: 1px solid #ddd; background: ${quiz.published ? '#d4edda' : '#f8d7da'};">
+                        <span style="color: ${quiz.published ? '#155724' : '#721c24'}; font-weight: bold;">
+                            ${quiz.published ? '✓' : '✗'}
+                        </span>
+                    </td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">${quiz.time_limit ? quiz.time_limit + ' min' : 'None'}</td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">${quiz.allowed_attempts === -1 ? 'Unlimited' : quiz.allowed_attempts || 1}</td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">${scoringPolicy}</td>
+                    <td style="padding: 10px; border: 1px solid #ddd; background: ${quiz.shuffle_answers ? '#d4edda' : '#f8d7da'};">
+                        <span style="color: ${quiz.shuffle_answers ? '#155724' : '#721c24'}; font-weight: bold;">
+                            ${quiz.shuffle_answers ? '✓' : '✗'}
+                        </span>
+                    </td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">${quiz.question_count || 0}</td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">${quiz.points_possible || 0}</td>
+                `;
+            } else if (currentTab === 'visibility') {
+                // Visibility mode
+                const showCorrect = quiz.show_correct_answers;
+                const dueDate = quiz.due_at ? new Date(quiz.due_at).toLocaleString() : 'N/A';
+                const unlockAt = quiz.unlock_at ? new Date(quiz.unlock_at).toLocaleString() : 'N/A';
+                const lockAt = quiz.lock_at ? new Date(quiz.lock_at).toLocaleString() : 'N/A';
+                const showAfter = quiz.show_correct_answers_at ? new Date(quiz.show_correct_answers_at).toLocaleString() : 'N/A';
+                const hideAfter = quiz.hide_correct_answers_at ? new Date(quiz.hide_correct_answers_at).toLocaleString() : 'N/A';
+                const lastAttemptOnly = quiz.show_correct_answers_last_attempt;
+
+                const hideResults = quiz.hide_results;
+                let showResponsesText = 'Yes';
+                let showResponsesBg = '#d4edda';
+                let showResponsesColor = '#155724';
+
+                if (hideResults === 'always') {
+                    showResponsesText = 'No';
+                    showResponsesBg = '#f8d7da';
+                    showResponsesColor = '#721c24';
+                } else if (hideResults === 'until_after_last_attempt') {
+                    showResponsesText = 'After Last';
+                    showResponsesBg = '#fff3cd';
+                    showResponsesColor = '#856404';
+                }
+
+                row.innerHTML = `
+                    <td style="padding: 10px; border: 1px solid #ddd;">
+                        <a href="/courses/${courseId}/quizzes/${quiz.id}/edit" target="_blank" style="color: #0374B5; text-decoration: none;">
+                            ${quiz.title}
+                        </a>
+                    </td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">${dueDate}</td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">${unlockAt}</td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">${lockAt}</td>
+                    <td style="padding: 10px; border: 1px solid #ddd; background: ${showResponsesBg};">
+                        <span style="color: ${showResponsesColor}; font-weight: bold;">${showResponsesText}</span>
+                    </td>
+                    <td style="padding: 10px; border: 1px solid #ddd; background: ${showCorrect ? '#d4edda' : '#f8d7da'};">
+                        <span style="color: ${showCorrect ? '#155724' : '#721c24'}; font-weight: bold;">
+                            ${showCorrect ? '✓' : '✗'}
+                        </span>
+                    </td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">${showAfter}</td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">${hideAfter}</td>
+                    <td style="padding: 10px; border: 1px solid #ddd; background: ${lastAttemptOnly ? '#d4edda' : '#f8d7da'};">
+                        <span style="color: ${lastAttemptOnly ? '#155724' : '#721c24'}; font-weight: bold;">
+                            ${lastAttemptOnly ? '✓' : '✗'}
+                        </span>
+                    </td>
+                `;
+            } else if (currentTab === 'security') {
+                // Security mode
+                // Format one question at a time with lock info
+                let oneAtTime = '';
+                if (quiz.one_question_at_a_time) {
+                    if (quiz.cant_go_back) {
+                        oneAtTime = '<span style="color: #155724; font-weight: bold;">✓</span> (Locked)';
+                    } else {
+                        oneAtTime = '<span style="color: #155724; font-weight: bold;">✓</span>';
+                    }
+                } else {
+                    oneAtTime = '<span style="color: #721c24; font-weight: bold;">✗</span>';
+                }
+                const oneAtTimeBg = quiz.one_question_at_a_time ? '#d4edda' : '#f8d7da';
+
+                // Access code check
+                const hasAccessCode = quiz.access_code ? true : false;
+                const accessCodeDisplay = hasAccessCode ? '<span style="color: #155724; font-weight: bold;">✓</span>' : '<span style="color: #721c24; font-weight: bold;">✗</span>';
+                const accessCodeBg = hasAccessCode ? '#d4edda' : '#f8d7da';
+
+                // IP filter check
+                const hasIpFilter = quiz.ip_filter ? true : false;
+                const ipFilterDisplay = hasIpFilter ? '<span style="color: #155724; font-weight: bold;">✓</span>' : '<span style="color: #721c24; font-weight: bold;">✗</span>';
+                const ipFilterBg = hasIpFilter ? '#d4edda' : '#f8d7da';
+
+                // Proctoring check
+                const hasLockdown = quiz.require_lockdown_browser || false;
+                const hasHonorlock = quiz.access_code && quiz.access_code.startsWith('HL_NO_EDIT_');
+                let proctoringText = 'None';
+                let proctoringBg = '#f9f9f9';
+                let proctoringColor = '#333';
+
+                if (hasLockdown && hasHonorlock) {
+                    proctoringText = 'Both';
+                    proctoringBg = '#f8d7da';
+                    proctoringColor = '#721c24';
+                } else if (hasLockdown) {
+                    proctoringText = 'Lockdown';
+                    proctoringBg = '#d4edda';
+                    proctoringColor = '#155724';
+                } else if (hasHonorlock) {
+                    proctoringText = 'Honorlock';
+                    proctoringBg = '#d4edda';
+                    proctoringColor = '#155724';
+                }
+
+                // Lockdown for results check
+                const hasLockdownResults = quiz.require_lockdown_browser_for_results || false;
+                const lockdownResultsDisplay = hasLockdownResults ? '<span style="color: #155724; font-weight: bold;">✓</span>' : '<span style="color: #721c24; font-weight: bold;">✗</span>';
+                const lockdownResultsBg = hasLockdownResults ? '#d4edda' : '#f8d7da';
+
+                row.innerHTML = `
+                    <td style="padding: 10px; border: 1px solid #ddd;">
+                        <a href="/courses/${courseId}/quizzes/${quiz.id}/edit" target="_blank" style="color: #0374B5; text-decoration: none;">
+                            ${quiz.title}
+                        </a>
+                    </td>
+                    <td style="padding: 10px; border: 1px solid #ddd; background: ${oneAtTimeBg};">
+                        ${oneAtTime}
+                    </td>
+                    <td style="padding: 10px; border: 1px solid #ddd; background: ${accessCodeBg};">
+                        ${accessCodeDisplay}
+                    </td>
+                    <td style="padding: 10px; border: 1px solid #ddd; background: ${ipFilterBg};">
+                        ${ipFilterDisplay}
+                    </td>
+                    <td style="padding: 10px; border: 1px solid #ddd; background: ${proctoringBg};">
+                        <span style="color: ${proctoringColor}; font-weight: bold;">${proctoringText}</span>
+                    </td>
+                    <td style="padding: 10px; border: 1px solid #ddd; background: ${lockdownResultsBg};">
+                        ${lockdownResultsDisplay}
+                    </td>
+                `;
+            }
+
+            tbody.appendChild(row);
+        });
+
+        table.appendChild(tbody);
+        tableWrapper.appendChild(table);
+        contentArea.appendChild(tableWrapper);
+
+        // Add summary stats
+        const stats = document.createElement('div');
+        stats.style.cssText = 'margin-top: 20px; padding: 10px; background: #f5f5f5; border-radius: 4px;';
+        stats.innerHTML = `<strong>Total Graded Quizzes:</strong> ${currentQuizzes.length} | <strong>Published:</strong> ${currentQuizzes.filter(q => q.published).length} | <strong>Unpublished:</strong> ${currentQuizzes.filter(q => !q.published).length}`;
+        contentArea.appendChild(stats);
+    }
+})();
