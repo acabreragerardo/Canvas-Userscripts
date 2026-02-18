@@ -1,0 +1,262 @@
+// ==UserScript==
+// @name         Canvas | Link Validator | Change Links to Edit
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Changes Canvas item links in Link Validator to open their edit pages directly, with toast notification for confirmation.
+// @author       ChatGPT & Claude (w/ tweaks from Alex C.)
+// @match        https://*.instructure.com/courses/*/link_validator
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Create and append toast notification container
+    function createToastContainer() {
+        const toastContainer = document.createElement('div');
+        toastContainer.id = 'edit-links-toast-container';
+        toastContainer.style.cssText = `
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+        `;
+        document.body.appendChild(toastContainer);
+        return toastContainer;
+    }
+
+    // Show toast notification
+    function showToast(message, type = 'info') {
+        let container = document.getElementById('edit-links-toast-container');
+        if (!container) {
+            container = createToastContainer();
+        }
+
+        const toast = document.createElement('div');
+        toast.className = `edit-links-toast ${type}`;
+        toast.style.cssText = `
+            background-color: ${type === 'success' ? '#0374B5' : '#2196f3'};
+            color: white;
+            padding: 12px 20px;
+            border-radius: 4px;
+            margin-top: 10px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            opacity: 0;
+            transition: opacity 0.3s ease-in-out;
+            max-width: 300px;
+        `;
+        toast.innerHTML = message;
+        container.appendChild(toast);
+
+        // Fade in
+        setTimeout(() => {
+            toast.style.opacity = '1';
+        }, 10);
+
+        // Remove after 3 seconds
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            setTimeout(() => {
+                container.removeChild(toast);
+            }, 300);
+        }, 3000);
+    }
+
+    // Check if a URL is a Canvas internal link
+    function isCanvasLink(url) {
+        if (!url) return false;
+
+        // Check if it's a relative URL or matches instructure.com domain
+        if (url.startsWith('/')) return true;
+
+        try {
+            const urlObj = new URL(url);
+            return urlObj.hostname.includes('instructure.com');
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // Check if URL points to a module
+    function isModuleLink(url) {
+        return url && url.includes('/modules');
+    }
+
+    // Convert Canvas link to edit version
+    function convertToEditLink(url) {
+        if (!url || url.endsWith('/edit')) return url;
+
+        // Handle different Canvas content types
+        const patterns = [
+            { regex: /\/pages\/([^\/\?#]+)/, replacement: '/pages/$1/edit' },
+            { regex: /\/assignments\/(\d+)/, replacement: '/assignments/$1/edit' },
+            { regex: /\/discussion_topics\/(\d+)/, replacement: '/discussion_topics/$1/edit' },
+            { regex: /\/quizzes\/(\d+)/, replacement: '/quizzes/$1/edit' },
+            { regex: /\/assignments\/syllabus$/, replacement: '/assignments/syllabus/edit' }
+        ];
+
+        for (const pattern of patterns) {
+            if (pattern.regex.test(url)) {
+                return url.replace(pattern.regex, pattern.replacement);
+            }
+        }
+
+        // Default: try appending /edit if no pattern matched
+        // Remove any hash or query params first
+        const baseUrl = url.split(/[?#]/)[0];
+        return `${baseUrl}/edit`;
+    }
+
+    // Function to change item links to their edit pages
+    function changeLinksToEditPages() {
+        console.log("Changing Link Validator item links to point to edit pages...");
+        let changedCount = 0;
+
+        // Find all result blocks
+        const resultBlocks = document.querySelectorAll('.result');
+        console.log(`Found ${resultBlocks.length} result blocks.`);
+
+        resultBlocks.forEach(resultBlock => {
+            // Find the main heading link within this result block
+            // Look for h2 containing an anchor tag
+            const heading = resultBlock.querySelector('h2');
+            if (!heading) return;
+
+            const itemLink = heading.querySelector('a');
+            if (!itemLink) return;
+
+            const itemHref = itemLink.getAttribute('href');
+
+            // Skip if not a Canvas link
+            if (!isCanvasLink(itemHref)) {
+                console.log(`Skipping external link: ${itemHref}`);
+                return;
+            }
+
+            // Skip module links
+            if (isModuleLink(itemHref)) {
+                console.log(`Skipping module link: ${itemHref}`);
+                return;
+            }
+
+            // Only convert if it isn't already an edit URL
+            if (itemHref && !itemHref.endsWith('/edit')) {
+                const editUrl = convertToEditLink(itemHref);
+                itemLink.href = editUrl;
+
+                // Add a small indicator icon if not already present
+                if (!itemLink.querySelector('.edit-indicator')) {
+                    const editIcon = document.createElement('i');
+                    editIcon.className = 'icon-edit edit-indicator';
+                    editIcon.style.marginLeft = '5px';
+                    editIcon.style.fontSize = '12px';
+                    itemLink.appendChild(editIcon);
+                }
+
+                changedCount++;
+                console.log(`Link changed to edit page: ${editUrl}`);
+            }
+        });
+
+        // Update button if it exists
+        const button = document.getElementById('change-links-to-edit-button');
+        if (button) {
+            button.innerHTML = "⚡Links Changed to Edit";
+            button.style.setProperty('background-color', '#0374B5', 'important');
+            button.style.setProperty('color', '#fff', 'important');
+            button.dataset.completed = 'true';
+
+            // Reset after 2 seconds
+            setTimeout(() => {
+                button.innerHTML = "⚡Change Links to Edit";
+                button.style.removeProperty('background-color');
+                button.style.removeProperty('color');
+                delete button.dataset.completed;
+            }, 2000);
+        }
+
+        // Show toast notification with the count
+        showToast(`<strong>${changedCount} links</strong> changed to edit mode 📝`, 'success');
+
+        return changedCount;
+    }
+
+    // Function to create the "Change Links to Edit" button
+    function createButton() {
+        // Check if button already exists
+        if (document.getElementById('change-links-to-edit-button')) {
+            return;
+        }
+
+        // Look for the right-of-crumbs container
+        const buttonContainer = document.querySelector('.right-of-crumbs');
+        if (buttonContainer) {
+            const addButton = document.createElement('a');
+            addButton.id = 'change-links-to-edit-button';
+            addButton.className = 'btn';
+            addButton.style.cssText = 'margin-left: 10px; border: 2px solid #0374B5; transition: background-color 0.2s ease; cursor: pointer;';
+            addButton.innerHTML = '⚡Change Links to Edit';
+
+            // Hover handlers
+            const hoverIn = function() {
+                if (!this.dataset.completed) {
+                    this.style.setProperty('background-color', '#e8e8e8', 'important');
+                }
+            };
+            const hoverOut = function() {
+                if (!this.dataset.completed) {
+                    this.style.setProperty('background-color', '', '');
+                }
+            };
+
+            addButton.addEventListener('mouseenter', hoverIn);
+            addButton.addEventListener('mouseleave', hoverOut);
+
+            addButton.onclick = function() {
+                console.log("Change Links to Edit button clicked!");
+                changeLinksToEditPages();
+            };
+
+            buttonContainer.appendChild(addButton);
+            console.log("Change Links to Edit button created.");
+        } else {
+            console.log("Button container (.right-of-crumbs) not found.");
+        }
+    }
+
+    // Use MutationObserver to detect when the page is fully loaded
+    function initObserver() {
+        // Try to create button immediately
+        createButton();
+
+        // Set up observer for late-loading elements
+        const observer = new MutationObserver(function(mutations) {
+            for (const mutation of mutations) {
+                if (mutation.addedNodes.length > 0) {
+                    if (!document.getElementById('change-links-to-edit-button') &&
+                        document.querySelector('.right-of-crumbs')) {
+                        createButton();
+                        observer.disconnect();
+                        break;
+                    }
+                }
+            }
+        });
+
+        observer.observe(document.body, { childList: true, subtree: true });
+
+        // Fallback to window.onload
+        window.addEventListener('load', function() {
+            if (!document.getElementById('change-links-to-edit-button')) {
+                createButton();
+                observer.disconnect();
+            }
+        });
+    }
+
+    // Start the script
+    initObserver();
+})();
