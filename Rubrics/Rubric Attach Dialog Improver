@@ -1,0 +1,681 @@
+// ==UserScript==
+// @name        Canvas | Rubrics | Rubric Attach Dialog Improver
+// @author      James Jones from the Instructure Community, tweaked slightly by Alex & Claude
+// @description Reorders the Find a Rubric dialog so the current class is listed first, performs filtering and sorting, and resizes the dialog for better usability
+// @include     /^https://.*\.instructure\.com/courses/[0-9]+/(assignments|quizzes|discussion_topics)/[0-9]+[?]?/
+// @version     2
+// @grant       none
+// ==/UserScript==
+(function() {
+  'use strict';
+
+  const assignRegex = /^\/courses\/[0-9]+\/(assignments|quizzes|discussion_topics)\/[0-9]+$/;
+  const assignMatch = assignRegex.test(window.location.pathname);
+  if (!assignMatch) {
+    return;
+  }
+
+  const config = {
+    // sortOrder is the order to sort any courses after the current one, which
+    // will always be placed first. See sortableKeys and predefinedSorts below.
+    // The default sort is by name and then term (sortOrder 1)
+    // 0 : do not sort
+    // 1 : courses first, then sort by name, then term
+    // 2 : courses first, then sort by term, then name
+    // 3 : accounts first, then sort by name, then term
+    // You may add your own custom sort order by specifying an array of keys.
+    // You may specify a + or - at the end of each key to sort in ascending or
+    // descending order for that key. For example, the following line would
+    // sort by contexts in ascending order, then course title, and then terms
+    // 'sortOrder' : [ 'context+', 'title', 'term' ],
+    'sortOrder' : 1,
+
+    // courseLookup = true will attempt to look up the course information for
+    // the courses. Setting this to false will cause all of
+    // the configuration settings below except for sortOrder and hideAccounts to
+    // be ignored. Default is true
+    'courseLookup' : true,
+
+    // addTerm = true will add the term name beneath the course name. Default
+    // is true.
+    'addTerm' : true,
+
+    // removeCount = true will remove the rubric count and show just the term.
+    // You may want to do this if your term names are really long and the
+    // lines wrap or if all you care about is the term. Default is false.
+    'removeCount' : false,
+
+    // prependTerm = true will put the term in front of the rubric count and
+    // false will put it after the rubric count. Default is true.
+    'prependTerm' : true,
+
+    // hideDays will hide any course that ended more than hiddenDays ago. To
+    // disable hiding old courses and show all of them, leave this out or set
+    // it to a negative value. Default is -1 to show all courses
+    'hideDays' : -1,
+
+    // hideUnknown = true will hide courses that do not appear in your
+    // list of courses. Default is false
+    'hideUnknown' : false,
+
+    // hideAccounts = true will hide the account contexts and show only the
+    // course contexts. Default is false
+    'hideAccounts' : false,
+
+    // hideNeverending = true will hide courses that belong to a term that does
+    // not have an end date listed. This may be your default term, but there may
+    // be other open terms. Default is false
+    'hideNeverending' : false,
+
+    // separator is the string to put between the rubric count and the term.
+    // Default is the pipe symbol |
+    'separator' : ' | ',
+
+    // dialogWidth sets the width of the rubric dialog in pixels
+    // Set to false to use default width
+    'dialogWidth' : 800,
+
+    // dialogHeight sets the height of the rubric dialog in pixels
+    // Set to false to use default height
+    'dialogHeight' : 800
+  };
+
+  // Global defines
+  const sortableKeys = {
+    'name' : 's+',
+    'title' : 's+',
+    'context' : 's-',
+    'courseEnd' : 'd-',
+    'courseStart' : 'd-',
+    'termName' : 's-',
+    'termStart' : 'd-',
+    'termEnd' : 'd-',
+    'term' : ':termEnd'
+  };
+
+  const predefinedSorts = {
+    1 : [ 'context', 'name', 'term' ],
+    2 : [ 'context', 'term', 'name' ],
+    3 : [ 'context+', 'name', 'term' ],
+  };
+
+  const LOAD_STATE = {
+    FIRST: 1,
+    CURRENT: 2
+  };
+
+  let courses;
+  let contextInfo = {};
+  const contextRegex = /^(account|course)_([0-9]+)$/;
+  let isCurrentFirst = false;
+
+  checkDialog();
+
+  function checkDialog() {
+    const selector = 'ul.rubrics_dialog_contexts_select';
+    const element = document.querySelector(selector);
+    if (element) {
+      checkList();
+    } else {
+      const dialogTarget = document.body;
+      const dialogObserver = new MutationObserver((mutations) => {
+        let found = false;
+        mutations.forEach((mutation) => {
+          if (mutation.addedNodes.length === 1) {
+            const node = mutation.addedNodes[0];
+            if (node.querySelector && node.querySelector(selector)) {
+              found = true;
+            }
+          }
+        });
+        if (found) {
+          dialogObserver.disconnect();
+          checkList();
+        }
+      });
+      dialogObserver.observe(dialogTarget, {
+        'childList' : true
+      });
+    }
+  }
+
+  function checkList() {
+    const selector = 'ul.rubrics_dialog_contexts_select';
+    const element = document.querySelector(selector);
+
+    resizeDialog();
+
+    if (element.children.length > 1) {
+      processList();
+    } else {
+      const listObserver = new MutationObserver(() => {
+        listObserver.disconnect();
+        processList();
+      });
+      listObserver.observe(element, {
+        'childList' : true
+      });
+    }
+  }
+
+  let dialogResizeObserver = null;
+
+  function resizeDialog() {
+    if ((typeof config.dialogWidth === 'undefined' || config.dialogWidth === false) &&
+        (typeof config.dialogHeight === 'undefined' || config.dialogHeight === false)) {
+      return;
+    }
+
+    // Look for the actual dialog wrapper (the .ui-dialog div)
+    const dialogWrapper = document.querySelector('.ui-dialog:has(#rubric_dialog)');
+    const dialogContent = document.querySelector('#rubric_dialog');
+
+    if (!dialogWrapper || !dialogContent) {
+      // Dialog not visible yet, wait and retry
+      setTimeout(resizeDialog, 150);
+      return;
+    }
+
+    // Check if dialog is visible (has actual dimensions)
+    const rect = dialogWrapper.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+      setTimeout(resizeDialog, 150);
+      return;
+    }
+
+    // Function to apply our custom sizes
+    function applyCustomSize() {
+      if (config.dialogWidth !== false && config.dialogWidth > 0) {
+        dialogWrapper.style.width = config.dialogWidth + 'px';
+      }
+
+      if (config.dialogHeight !== false && config.dialogHeight > 0) {
+        dialogWrapper.style.height = config.dialogHeight + 'px';
+        // Also adjust the content area
+        dialogContent.style.height = (config.dialogHeight - 50) + 'px';
+      }
+    }
+
+    // Apply size immediately
+    applyCustomSize();
+
+    // Watch for Canvas trying to change it back and override it
+    if (dialogResizeObserver) {
+      dialogResizeObserver.disconnect();
+    }
+
+    dialogResizeObserver = new MutationObserver((mutations) => {
+      mutations.forEach((mutation) => {
+        if (mutation.type === 'attributes' && mutation.attributeName === 'style') {
+          // Canvas changed the style, reapply our custom size
+          applyCustomSize();
+        }
+      });
+    });
+
+    dialogResizeObserver.observe(dialogWrapper, {
+      attributes: true,
+      attributeFilter: ['style']
+    });
+  }
+
+  function doneLoading(state) {
+    if (typeof doneLoading.loaded === 'undefined') {
+      doneLoading.loaded = state;
+    } else {
+      if (state === LOAD_STATE.FIRST) {
+        loadCurrentContext();
+      }
+    }
+  }
+
+  function waitForLoad(element, state) {
+    if (element.classList.contains('loaded')) {
+      doneLoading(state);
+    } else {
+      const observer = new MutationObserver(() => {
+        if (element.classList.contains('loaded')) {
+          doneLoading(state);
+          observer.disconnect();
+        }
+      });
+      observer.observe(element, {
+        'attributes' : true
+      });
+    }
+  }
+
+  function getName(item) {
+    if (typeof item === 'undefined') {
+      return undefined;
+    }
+    const el = item.querySelector('span.name');
+    return el ? el.textContent : undefined;
+  }
+
+  function getContext(item) {
+    if (typeof item === 'undefined') {
+      return undefined;
+    }
+    const el = item.querySelector('span.context_code');
+    return el ? parseContextCode(el.textContent) : undefined;
+  }
+
+  function parseContextCode(code) {
+    const matches = contextRegex.exec(code);
+    if (matches) {
+      return {
+        'code' : code,
+        'context' : matches[1],
+        'id' : matches[2]
+      };
+    }
+    return undefined;
+  }
+
+  function getContextList() {
+    const selector = 'ul.rubrics_dialog_contexts_select li:not(.blank)';
+    const list = document.querySelectorAll(selector);
+
+    if (list.length > 0) {
+      for (let i = 0; i < list.length; i++) {
+        const context = getContext(list[i]);
+        if (context && typeof contextInfo[context.code] === 'undefined') {
+          contextInfo[context.code] = context;
+          contextInfo[context.code].name = getName(list[i]);
+        }
+        if (context) {
+          contextInfo[context.code].row = i;
+        }
+      }
+    }
+    return list;
+  }
+
+  function processList() {
+    try {
+      const list = getContextList();
+      if (list.length > 1) {
+        waitForLoad(list[0], LOAD_STATE.FIRST);
+        const parent = list[0].parentNode;
+        const currentContext = ENV.context_asset_string;
+        if (parent && typeof contextInfo[currentContext] !== 'undefined') {
+          isCurrentFirst = true;
+          const currentPosition = contextInfo[currentContext].row;
+          if (currentPosition > 0) {
+            const current = list[currentPosition];
+            const cur = parent.insertBefore(current, list[0]);
+            waitForLoad(current, LOAD_STATE.CURRENT);
+            cur.click();
+          }
+        }
+      }
+      if (typeof config.courseLookup === 'undefined' || config.courseLookup) {
+        courses = new GetData('/api/v1/courses', addCourseInfo, {
+          'data' : {
+            'include' : [ 'term' ]
+          },
+          'perPage' : 50
+        });
+      } else {
+        sortList();
+      }
+    } catch (e) {
+      console.error('Error in processList:', e);
+    }
+  }
+
+  function loadCurrentContext() {
+    const list = getContextList();
+    if (list.length > 1) {
+      list[0].click();
+    }
+  }
+
+  function determineSortOrder(userOrder) {
+    if (typeof userOrder === 'undefined' || typeof sortableKeys !== 'object') {
+      return false;
+    }
+
+    let sortOrder;
+    const keyRegex = /^([a-zA-Z]+)([+-])?$/;
+    const keyInfoRegex = /^([sd])([+-])$/;
+
+    if (typeof userOrder !== 'object' && /^[0-9]+$/.test(userOrder)) {
+      if (typeof predefinedSorts[userOrder] !== 'undefined') {
+        userOrder = predefinedSorts[userOrder];
+      }
+    }
+
+    if (Array.isArray(userOrder)) {
+      sortOrder = [];
+      for (let k = 0; k < userOrder.length; k++) {
+        const matches = keyRegex.exec(userOrder[k]);
+        if (matches) {
+          let key = matches[1];
+          // Resolve aliases
+          while (typeof sortableKeys[key] !== 'undefined' && /^[:]/.test(sortableKeys[key])) {
+            key = sortableKeys[key].substr(1);
+          }
+          if (typeof sortableKeys[key] !== 'undefined') {
+            const keyInfo = keyInfoRegex.exec(sortableKeys[key]);
+            let type = 's';
+            let asc = true;
+            if (keyInfo) {
+              type = keyInfo[1];
+              asc = keyInfo[2] === '+';
+            }
+            if (typeof matches[2] !== 'undefined') {
+              asc = matches[2] === '+';
+            }
+            sortOrder.push({
+              'key' : key,
+              'asc' : asc,
+              'type' : type
+            });
+          }
+        }
+      }
+    }
+
+    if (typeof sortOrder === 'undefined' || sortOrder.length === 0) {
+      sortOrder = false;
+    }
+    return sortOrder;
+  }
+
+  function sortList() {
+    hideContent();
+    const keys = determineSortOrder(config.sortOrder);
+    if (keys === false) {
+      return;
+    }
+    const list = getContextList();
+    if (typeof list === 'undefined' || list.length < (isCurrentFirst ? 3 : 2)) {
+      // No point in sorting if there's only one item that can be sorted
+      return;
+    }
+    const parent = list[0].parentNode;
+    if (!parent) {
+      return;
+    }
+    const currentContext = ENV.context_asset_string;
+    const items = [];
+    const contextKeys = Object.keys(contextInfo);
+    for (let i = 0; i < contextKeys.length; i++) {
+      if (typeof contextInfo[contextKeys[i]].hidden === 'undefined' || contextInfo[contextKeys[i]].hidden === false) {
+        items.push(contextKeys[i]);
+      }
+    }
+    items.sort(multisort);
+    const rows = [];
+    for (let k = 0; k < items.length; k++) {
+      const row = contextInfo[items[k]].row;
+      rows.push(list[row]);
+    }
+    const start = isCurrentFirst ? 1 : 0;
+    let top = list[start];
+    for (let k = rows.length - 1; k >= start; k--) {
+      top = parent.insertBefore(rows[k], top);
+    }
+    if (!isCurrentFirst) {
+      // Activate the top one
+      waitForLoad(top, LOAD_STATE.CURRENT);
+      top.click();
+    }
+    return;
+
+    function multisort(a, b) {
+      const current = (a === currentContext ? -1 : 0) + (b === currentContext ? 1 : 0);
+      if (current !== 0) {
+        return current;
+      }
+
+      let order = 0;
+      let i = 0;
+      while (order === 0 && i < keys.length) {
+        const key = keys[i];
+        i++;
+        const A = typeof contextInfo[a][key.key] === 'undefined' ? null : contextInfo[a][key.key];
+        const B = typeof contextInfo[b][key.key] === 'undefined' ? null : contextInfo[b][key.key];
+        if (A === B) {
+          continue;
+        }
+        if (A !== null && B !== null) {
+          switch (key.type) {
+            case 's':
+              order = A.localeCompare(B);
+              break;
+            case 'd':
+              order = A < B ? -1 : 1;
+              break;
+          }
+        } else {
+          order = A === null ? -1 : 1;
+        }
+        if (order !== 0 && !key.asc) {
+          order = -order;
+        }
+      }
+      return order;
+    }
+  }
+
+  function addCourseInfo() {
+    const list = getContextList();
+    if (list.length > 0) {
+      const sep = typeof config.separator === 'undefined' ? ' | ' : config.separator;
+      const addTerm = typeof config.addTerm === 'undefined' ? true : config.addTerm;
+
+      for (let j = 0; j < courses.data.length; j++) {
+        const course = courses.data[j];
+        const courseCode = 'course_' + course.id;
+        if (typeof contextInfo[courseCode] === 'undefined') {
+          continue;
+        }
+        // This course is in context list
+        const context = contextInfo[courseCode];
+        context.courseStart = course.start_at;
+        context.courseEnd = course.end_at;
+        const courseRow = context.row;
+        const el = list[courseRow];
+        if (course.name) {
+          context.title = course.name;
+          const anchor = el.querySelector('a');
+          if (anchor) {
+            anchor.title = course.name;
+          }
+        }
+        if (addTerm && typeof course.term !== 'undefined') {
+          context.termName = course.term.name;
+          context.termStart = course.term.start_at;
+          context.termEnd = course.term.end_at;
+          const div = el.querySelector('div.rubrics');
+          if (div) {
+            const rubricCount = div.textContent;
+            let txt = '';
+            if (typeof config.removeCount !== 'undefined' && config.removeCount) {
+              txt = course.term.name;
+            } else {
+              if (typeof config.prependTerm === 'undefined' || config.prependTerm) {
+                txt = course.term.name + sep + rubricCount;
+              } else {
+                txt = rubricCount + sep + course.term.name;
+              }
+            }
+            div.textContent = txt;
+          }
+        }
+      }
+    }
+    sortList();
+  }
+
+  function hideContent() {
+    const hideAccounts = typeof config.hideAccounts === 'undefined' ? false : config.hideAccounts;
+    let hideUnknown = false;
+    let hideDate = false;
+    let hideNeverending = false;
+
+    if (typeof config.courseLookup !== 'undefined') {
+      hideUnknown = typeof config.hideUnknown === 'undefined' ? false : config.hideUnknown;
+      if (typeof config.hideDays !== 'undefined' && config.hideDays >= 0) {
+        const dt = new Date();
+        dt.setDate(dt.getDate() - config.hideDays);
+        hideDate = dt.toISOString().replace(/[.][0-9]{3}Z$/, 'Z');
+      }
+      hideNeverending = typeof config.hideNeverending === 'undefined' ? false : config.hideNeverending;
+    }
+
+    const list = getContextList();
+    const codes = Object.keys(contextInfo);
+    let hiddenCount = 0;
+
+    for (let i = 0; i < codes.length; i++) {
+      let hidden = false;
+      const context = contextInfo[codes[i]];
+      if (context.code === ENV.context_asset_string) {
+        continue;
+      }
+      if (hideAccounts && context.context === 'account') {
+        hidden = true;
+      }
+      if (hideUnknown && context.context === 'course' && typeof context.title === 'undefined') {
+        hidden = true;
+      }
+      if (hideDate !== false && context.context === 'course' && context.courseEnd && context.courseEnd < hideDate) {
+        hidden = true;
+      }
+      if (hideNeverending && context.context === 'course' && context.termEnd === null) {
+        hidden = true;
+      }
+      if (hidden) {
+        context.hidden = true;
+        hiddenCount++;
+      }
+    }
+
+    if (hiddenCount < codes.length) {
+      for (let i = 0; i < codes.length; i++) {
+        const context = contextInfo[codes[i]];
+        if (typeof context.hidden !== 'undefined' && context.hidden) {
+          list[context.row].style.display = 'none';
+        }
+      }
+    }
+  }
+
+  function GetData(url, finishedFunction, opts) {
+    if (typeof this === 'undefined') {
+      throw new Error('GetData must be invoked with a new statement');
+    }
+    const finished = typeof finishedFunction === 'function' ? finishedFunction : false;
+
+    // Options that can be specified
+    const options = {
+      'filter' : false,
+      'fetchAll' : true,
+      'perPage' : 100,
+      'timeout' : 2000,
+      'data' : undefined,
+      'deferReady' : false
+    };
+
+    if (typeof opts === 'object') {
+      for (let prop in opts) {
+        if (opts.hasOwnProperty(prop) && options.hasOwnProperty(prop)) {
+          options[prop] = opts[prop];
+        }
+      }
+    }
+
+    if (options.perPage > 0) {
+      if (typeof options.data === 'undefined') {
+        options.data = {};
+      }
+      if (typeof options.data.per_page === 'undefined') {
+        options.data.per_page = options.perPage;
+      }
+    }
+
+    let pending = 0;
+    this.isReady = false;
+    this.data = undefined;
+    const parent = this;
+
+    try {
+      (function getUrl() {
+        pending++;
+        $.ajax({
+          'url' : url,
+          'dataType' : 'json',
+          'data' : options.data,
+          'timeout' : options.timeout
+        }).done((d, status, jqXHR) => {
+          url = nextURL(jqXHR.getResponseHeader('Link'));
+
+          if (typeof d === 'object') {
+            if (Array.isArray(d)) {
+              if (typeof parent.data === 'undefined') {
+                parent.data = [];
+              }
+              for (let i = 0; i < d.length; i++) {
+                let valid = true;
+                if (typeof options.filter === 'function') {
+                  valid = options.filter(d[i]);
+                }
+                if (valid) {
+                  parent.data.push(d[i]);
+                }
+              }
+            } else {
+              if (typeof parent.data === 'undefined') {
+                let valid = true;
+                if (typeof options.filter === 'function') {
+                  valid = options.filter(d);
+                }
+                if (valid) {
+                  parent.data = d;
+                }
+              }
+            }
+          }
+
+          if (options.fetchAll && url) {
+            getUrl();
+          }
+          pending--;
+          if (pending <= 0) {
+            if (!options.deferReady) {
+              parent.isReady = true;
+            }
+            if (finished) {
+              finished();
+            }
+          }
+        }).fail(() => {
+          pending--;
+          throw new Error('Failed to load all of the data');
+        });
+      })();
+    } catch (e) {
+      console.error('GetData error:', e);
+    }
+  }
+
+  function nextURL(linkTxt) {
+    let url = null;
+    if (linkTxt) {
+      const links = linkTxt.split(',');
+      const nextRegEx = /^<(.*)>; rel="next"$/;
+      for (let i = 0; i < links.length; i++) {
+        const matches = nextRegEx.exec(links[i]);
+        if (matches) {
+          url = matches[1];
+        }
+      }
+    }
+    return url;
+  }
+
+})();
