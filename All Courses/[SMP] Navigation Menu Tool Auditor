@@ -1,0 +1,584 @@
+// ==UserScript==
+// @name         Canvas | All Courses | [SMP] Navigation Menu Tool Auditor
+// @version      2.5
+// @description  Audit Canvas courses for navigation tools (PantherBook, Simple Syllabus, Honorlock)
+// @author       Alex & Claude
+// @match        https://*.instructure.com/courses
+// @grant        none
+// @run-at       document-idle
+// @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // CONFIGURATION: Add or remove tools here
+    const NAVIGATION_TOOLS = {
+        'PantherBook Pack 1.3': '187741',
+        'Simple Syllabus': '172061',
+        'Honorlock 1.3': '183234'
+    };
+
+    // Get the Canvas base URL
+    const CANVAS_URL = window.location.origin;
+
+    // State
+    let allCourses = [];
+    let isRunning = false;
+    let termsLoaded = false;
+    let currentResults = null;
+    let modalCreated = false;
+
+    // Create modal
+    function createModal() {
+        console.log('Creating Navigation Auditor modal...');
+
+        // Check if modal already exists
+        if (document.getElementById('nav-tools-auditor-modal')) {
+            console.log('Modal already exists');
+            modalCreated = true;
+            return;
+        }
+
+        const modal = document.createElement('div');
+        modal.id = 'nav-tools-auditor-modal';
+        modal.style.cssText = `
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 10001;
+            justify-content: center;
+            align-items: center;
+        `;
+
+        modal.innerHTML = `
+            <div id="modal-content" style="background: white; border-radius: 12px; padding: 30px; max-width: 800px; max-height: 80vh; overflow-y: auto; box-shadow: 0 8px 32px rgba(0,0,0,0.2); width: 90%;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h2 style="margin: 0; color: #2D3B45; font-size: 24px;">🧭 Navigation Tools Auditor</h2>
+                    <button id="nav-close-modal" style="background: none; border: none; font-size: 24px; cursor: pointer; color: #666; padding: 0; line-height: 1; transition: color 0.2s;" onmouseover="this.style.color='#333'" onmouseout="this.style.color='#666'">&times;</button>
+                </div>
+
+                <div id="tool-description" style="margin-bottom: 25px; padding: 15px; background: #F5F5F5; border-radius: 8px; border-left: 4px solid #008EE2;">
+                    <p style="margin: 0; color: #2D3B45; font-size: 14px; line-height: 1.6;">
+                        <strong>Navigation Tool Audit:</strong> Checks if external tools are enabled and visible to students in the course navigation menu.
+                        A tool is considered enabled if it is not hidden and has visibility set to "public" or "members".
+                    </p>
+                </div>
+
+                <div style="margin-bottom: 20px;">
+                    <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #2D3B45;">Select Term:</label>
+                    <select id="nav-term-select" style="width: 100%; padding: 10px; border: 1px solid #C7CDD1; border-radius: 6px; font-size: 14px;">
+                        <option value="">Loading terms...</option>
+                    </select>
+                </div>
+
+                <div style="margin-bottom: 20px;">
+                    <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #2D3B45;">Select Tool to Audit:</label>
+                    <select id="nav-tool-select" style="width: 100%; padding: 10px; border: 1px solid #C7CDD1; border-radius: 6px; font-size: 14px;">
+                        <option value="">-- Select a Tool --</option>
+                        ${Object.keys(NAVIGATION_TOOLS).map(tool => `<option value="${NAVIGATION_TOOLS[tool]}">${tool}</option>`).join('')}
+                    </select>
+                </div>
+
+                <button id="nav-run-audit" style="width: 100%; padding: 12px; background: #008EE2; color: white; border: none; border-radius: 6px; font-size: 16px; font-weight: 600; cursor: pointer; margin-bottom: 20px; transition: all 0.2s ease;">
+                    Run Audit
+                </button>
+
+                <div id="nav-audit-results" style="display: none;">
+                    <div id="nav-progress-container" style="margin-bottom: 20px;">
+                        <div style="background: #E8EBED; border-radius: 10px; height: 20px; overflow: hidden;">
+                            <div id="nav-progress-bar" style="background: #008EE2; height: 100%; width: 0%; transition: width 0.3s;"></div>
+                        </div>
+                        <p id="nav-progress-text" style="text-align: center; margin-top: 8px; color: #666; font-size: 14px;">Checking courses...</p>
+                    </div>
+
+                    <div id="nav-results-content"></div>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+        console.log('Modal appended to body');
+
+        // Add close button handler
+        document.getElementById('nav-close-modal').onclick = closeModal;
+
+        // Close on Escape key only (not clicking outside)
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                const modalElement = document.getElementById('nav-tools-auditor-modal');
+                if (modalElement && modalElement.style.display === 'flex') {
+                    closeModal();
+                }
+            }
+        });
+
+        // Event listeners
+        document.getElementById('nav-run-audit').onclick = runAudit;
+        document.getElementById('nav-tool-select').onchange = updateDescription;
+
+        // Add hover effects to run audit button
+        const runAuditBtn = document.getElementById('nav-run-audit');
+        runAuditBtn.addEventListener('mouseenter', function() {
+            if (!this.disabled) {
+                this.style.background = '#006BB3';
+                this.style.transform = 'translateY(-2px)';
+                this.style.boxShadow = '0 4px 12px rgba(0,142,226,0.4)';
+            }
+        });
+        runAuditBtn.addEventListener('mouseleave', function() {
+            if (!this.disabled) {
+                this.style.background = '#008EE2';
+                this.style.transform = 'translateY(0)';
+                this.style.boxShadow = 'none';
+            }
+        });
+
+        modalCreated = true;
+        console.log('Modal creation complete');
+    }
+
+    function updateDescription() {
+        const toolSelect = document.getElementById('nav-tool-select');
+        const selectedTool = toolSelect.options[toolSelect.selectedIndex].text;
+        const descriptionDiv = document.getElementById('tool-description');
+
+        if (selectedTool && selectedTool !== '-- Select a Tool --') {
+            descriptionDiv.innerHTML = `
+                <p style="margin: 0; color: #2D3B45; font-size: 14px; line-height: 1.6;">
+                    <strong>Auditing ${selectedTool}:</strong> This checks if <strong>${selectedTool}</strong> is enabled and visible to students in the course navigation menu.
+                    A tool is considered enabled if it is not hidden and has visibility set to "public" or "members".
+                </p>
+            `;
+        } else {
+            descriptionDiv.innerHTML = `
+                <p style="margin: 0; color: #2D3B45; font-size: 14px; line-height: 1.6;">
+                    <strong>Navigation Tool Audit:</strong> Checks if external tools are enabled and visible to students in the course navigation menu.
+                    A tool is considered enabled if it is not hidden and has visibility set to "public" or "members".
+                </p>
+            `;
+        }
+    }
+
+    function openModal() {
+        console.log('openModal called for Navigation Auditor');
+
+        // Ensure modal exists
+        if (!modalCreated) {
+            console.log('Modal not created yet, creating now...');
+            createModal();
+        }
+
+        const modal = document.getElementById('nav-tools-auditor-modal');
+        console.log('Modal element:', modal);
+
+        if (!modal) {
+            console.error('ERROR: Modal element not found even after createModal()!');
+            alert('Error: Could not create modal. Please refresh the page and try again.');
+            return;
+        }
+
+        modal.style.display = 'flex';
+        console.log('Modal should now be visible');
+
+        if (!termsLoaded) {
+            console.log('Loading terms...');
+            loadTerms();
+        }
+    }
+
+    function closeModal() {
+        const modal = document.getElementById('nav-tools-auditor-modal');
+        if (modal) {
+            modal.style.display = 'none';
+            document.getElementById('nav-audit-results').style.display = 'none';
+            document.getElementById('nav-results-content').innerHTML = '';
+        }
+    }
+
+    async function loadTerms() {
+        const termSelect = document.getElementById('nav-term-select');
+        const runButton = document.getElementById('nav-run-audit');
+
+        termSelect.innerHTML = '<option value="">Loading terms...</option>';
+        runButton.disabled = true;
+        runButton.style.background = '#ccc';
+        runButton.textContent = 'Loading...';
+
+        try {
+            allCourses = await fetchAllCourses();
+
+            const terms = {};
+            allCourses.forEach(course => {
+                if (course.enrollment_term_id && course.term && course.term.name) {
+                    terms[course.enrollment_term_id] = course.term.name;
+                }
+            });
+
+            const sortedTerms = Object.entries(terms).sort((a, b) => b[0] - a[0]);
+            termSelect.innerHTML = '<option value="">-- Select a Term --</option>' +
+                sortedTerms.map(([id, name]) => `<option value="${id}">${name}</option>`).join('');
+
+            termsLoaded = true;
+            runButton.disabled = false;
+            runButton.style.background = '#008EE2';
+            runButton.textContent = 'Run Audit';
+
+        } catch (error) {
+            console.error('Error loading terms:', error);
+            termSelect.innerHTML = '<option value="">Error loading terms</option>';
+            runButton.textContent = 'Run Audit';
+            alert('Error loading terms. Please refresh and try again.');
+        }
+    }
+
+    async function fetchAllCourses() {
+        let courses = [];
+        let page = 1;
+        let hasMore = true;
+
+        while (hasMore) {
+            const response = await fetch(`${CANVAS_URL}/api/v1/courses?per_page=100&page=${page}&include[]=term`, {
+                headers: { 'Accept': 'application/json' }
+            });
+
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+            const data = await response.json();
+            courses = courses.concat(data);
+
+            const linkHeader = response.headers.get('Link');
+            hasMore = linkHeader && linkHeader.includes('rel="next"');
+            page++;
+        }
+
+        return courses;
+    }
+
+    async function runAudit() {
+        if (isRunning || !termsLoaded) return;
+
+        const termId = document.getElementById('nav-term-select').value;
+        const toolPath = document.getElementById('nav-tool-select').value;
+        const toolSelect = document.getElementById('nav-tool-select');
+        const toolName = toolSelect.options[toolSelect.selectedIndex].text;
+
+        if (!termId) {
+            alert('Please select a term');
+            return;
+        }
+
+        if (!toolPath) {
+            alert('Please select a tool');
+            return;
+        }
+
+        isRunning = true;
+        document.getElementById('nav-run-audit').disabled = true;
+        document.getElementById('nav-run-audit').style.background = '#ccc';
+        document.getElementById('nav-audit-results').style.display = 'block';
+        document.getElementById('nav-results-content').innerHTML = '';
+
+        document.getElementById('nav-progress-container').style.display = 'block';
+        document.getElementById('nav-progress-bar').style.width = '0%';
+        document.getElementById('nav-progress-text').textContent = 'Checking courses...';
+
+        const termCourses = allCourses.filter(c => c.enrollment_term_id == termId);
+
+        await runNavigationToolAudit(termCourses, toolPath, toolName);
+
+        isRunning = false;
+        document.getElementById('nav-run-audit').disabled = false;
+        document.getElementById('nav-run-audit').style.background = '#008EE2';
+    }
+
+    async function fetchCourseInstructors(courseId) {
+        try {
+            const response = await fetch(`${CANVAS_URL}/api/v1/courses/${courseId}/enrollments?per_page=100&state[]=active`, {
+                headers: { 'Accept': 'application/json' }
+            });
+
+            if (!response.ok) return [];
+
+            const enrollments = await response.json();
+
+            // Define role priorities and labels
+            const roleHierarchy = [
+                { id: '335', label: 'Primary Instructor' },
+                { id: '336', label: 'Secondary Instructor' },
+                { id: '230', label: 'Limited Teacher' },
+                { id: '228', label: 'Teacher (Facilitator)' },
+                { id: '337', label: 'Delegated Access' }
+            ];
+
+            const instructorNames = [];
+
+            // Check each role in priority order
+            for (const role of roleHierarchy) {
+                const enrollment = enrollments.find(e =>
+                    e.role_id === parseInt(role.id) &&
+                    e.user &&
+                    e.user.name &&
+                    e.enrollment_state === 'active'
+                );
+                if (enrollment && enrollment.user && enrollment.user.name) {
+                    instructorNames.push(`${role.label}: ${enrollment.user.name}`);
+                }
+            }
+
+            return instructorNames;
+        } catch (error) {
+            console.error(`Error fetching instructors for course ${courseId}:`, error);
+            return [];
+        }
+    }
+
+    async function runNavigationToolAudit(termCourses, toolPath, toolName) {
+        const coursesWithTool = [];
+        const coursesWithoutTool = [];
+        let processed = 0;
+        const BATCH_SIZE = 5;
+        const BATCH_DELAY = 100;
+
+        // Process in batches of 5
+        for (let i = 0; i < termCourses.length; i += BATCH_SIZE) {
+            const batch = termCourses.slice(i, i + BATCH_SIZE);
+
+            await Promise.all(batch.map(async (course) => {
+                try {
+                    const tabs = await fetchCourseTabs(course.id);
+                    const toolTab = tabs.find(tab =>
+                        tab.id === `context_external_tool_${toolPath}` ||
+                        (tab.html_url && tab.html_url.includes(`/external_tools/${toolPath}`))
+                    );
+
+                    const hasTool = toolTab &&
+                                    !toolTab.hidden &&
+                                    (toolTab.visibility === 'public' || toolTab.visibility === 'members');
+
+                    // Fetch instructor names
+                    const instructors = await fetchCourseInstructors(course.id);
+
+                    const courseData = {
+                        ...course,
+                        instructors: instructors
+                    };
+
+                    if (hasTool) {
+                        coursesWithTool.push(courseData);
+                    } else {
+                        coursesWithoutTool.push(courseData);
+                    }
+
+                } catch (error) {
+                    console.error(`Error checking course ${course.id}:`, error);
+                    coursesWithoutTool.push({
+                        ...course,
+                        instructors: []
+                    });
+                }
+            }));
+
+            processed += batch.length;
+            updateProgress(processed, termCourses.length);
+
+            // 100ms delay between batches
+            if (i + BATCH_SIZE < termCourses.length) {
+                await new Promise(resolve => setTimeout(resolve, BATCH_DELAY));
+            }
+        }
+
+        currentResults = {
+            type: 'navigation',
+            toolName: toolName,
+            withTool: coursesWithTool,
+            withoutTool: coursesWithoutTool
+        };
+
+        displayNavigationResults(toolName, coursesWithTool, coursesWithoutTool, toolPath);
+    }
+
+    async function fetchCourseTabs(courseId) {
+        const response = await fetch(`${CANVAS_URL}/api/v1/courses/${courseId}/tabs`, {
+            headers: { 'Accept': 'application/json' }
+        });
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return await response.json();
+    }
+
+    function updateProgress(current, total) {
+        const percent = Math.round((current / total) * 100);
+        document.getElementById('nav-progress-bar').style.width = percent + '%';
+        document.getElementById('nav-progress-text').textContent = `Checking courses... ${current} of ${total}`;
+    }
+
+    function exportToExcel() {
+        if (!currentResults) return;
+        const filename = `navigation_audit_${currentResults.toolName.replace(/[^a-z0-9]/gi, '_')}_${new Date().toISOString().split('T')[0]}.xlsx`;
+
+        const wb = XLSX.utils.book_new();
+
+        // Sheet 1: Courses WITHOUT the tool
+        const withoutData = [['Course Name', 'Course Code', 'Course ID', 'Instructor(s)', 'Settings URL']];
+        currentResults.withoutTool.forEach(course => {
+            const instructorList = course.instructors && course.instructors.length > 0 ? course.instructors.join(', ') : 'N/A';
+            withoutData.push([
+                course.name,
+                course.course_code || '',
+                course.id,
+                instructorList,
+                `${CANVAS_URL}/courses/${course.id}/settings#tab-navigation`
+            ]);
+        });
+        const ws1 = XLSX.utils.aoa_to_sheet(withoutData);
+        XLSX.utils.book_append_sheet(wb, ws1, 'Courses Without Tool');
+
+        // Sheet 2: Courses WITH the tool
+        const withData = [['Course Name', 'Course Code', 'Course ID', 'Instructor(s)', 'Course URL']];
+        currentResults.withTool.forEach(course => {
+            const instructorList = course.instructors && course.instructors.length > 0 ? course.instructors.join(', ') : 'N/A';
+            withData.push([
+                course.name,
+                course.course_code || '',
+                course.id,
+                instructorList,
+                `${CANVAS_URL}/courses/${course.id}`
+            ]);
+        });
+        const ws2 = XLSX.utils.aoa_to_sheet(withData);
+        XLSX.utils.book_append_sheet(wb, ws2, 'Courses With Tool');
+
+        // Write file
+        XLSX.writeFile(wb, filename);
+    }
+
+    function displayNavigationResults(toolName, withTool, withoutTool, toolPath) {
+        document.getElementById('nav-progress-container').style.display = 'none';
+
+        const resultsHTML = `
+            <div style="margin-bottom: 15px;">
+                <button id="export-excel" style="width: 100%; padding: 10px; background: #28A745; color: white; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s ease;">
+                    📊 Export to Excel
+                </button>
+            </div>
+
+            <div style="margin-bottom: 20px; padding: 12px; background: #FFF3E0; border-radius: 6px; border-left: 4px solid #FF9800;">
+                <h3 style="margin: 0 0 10px 0; color: #E65100; font-size: 16px;">⚠ Courses WITHOUT ${toolName} Enabled (${withoutTool.length})</h3>
+                ${withoutTool.length === 0 ?
+                    '<p style="margin: 0; color: #666; font-size: 13px;">All courses have this tool enabled!</p>' :
+                    `<p style="margin: 0 0 10px 0; color: #666; font-size: 13px;">
+                        Found ${withoutTool.length} course${withoutTool.length !== 1 ? 's' : ''} without this tool enabled.
+                    </p>
+                    <div style="max-height: 450px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; background: white;">
+                        ${withoutTool.map(course => `
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border-bottom: 1px solid #f0f0f0;">
+                                <div style="flex: 1; min-width: 0; margin-right: 10px;">
+                                    <div style="color: #2D3B45; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${course.name}</div>
+                                    ${course.instructors && course.instructors.length > 0 ? `<div style="color: #666; font-size: 11px; margin-top: 2px;">${course.instructors.join(', ')}</div>` : ''}
+                                </div>
+                                <a href="${CANVAS_URL}/courses/${course.id}/settings#tab-navigation"
+                                   target="_blank"
+                                   style="background: #008EE2; color: white; padding: 6px 14px; border-radius: 4px; text-decoration: none; font-size: 12px; white-space: nowrap; transition: all 0.2s ease; flex-shrink: 0;"
+                                   onmouseover="this.style.background='#006BB3'; this.style.transform='translateY(-1px)'; this.style.boxShadow='0 2px 6px rgba(0,142,226,0.3)'"
+                                   onmouseout="this.style.background='#008EE2'; this.style.transform='translateY(0)'; this.style.boxShadow='none'">
+                                    Fix Navigation
+                                </a>
+                            </div>
+                        `).join('')}
+                    </div>`
+                }
+            </div>
+
+            <div style="margin-bottom: 20px; padding: 12px; background: #E8F5E9; border-radius: 6px; border-left: 4px solid #4CAF50;">
+                <h3 style="margin: 0 0 10px 0; color: #2E7D32; font-size: 16px;">✓ Courses WITH ${toolName} Enabled (${withTool.length})</h3>
+                ${withTool.length === 0 ?
+                    '<p style="margin: 0; color: #666; font-size: 13px;">No courses found with this tool enabled</p>' :
+                    `<details style="cursor: pointer;">
+                        <summary style="padding: 8px; font-weight: 600; color: #2E7D32; font-size: 13px;">View ${withTool.length} courses</summary>
+                        <div style="margin-top: 10px; max-height: 300px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; background: white;">
+                            ${withTool.map(course => `
+                                <div style="padding: 6px 10px; border-bottom: 1px solid #f0f0f0;">
+                                    <span style="color: #2D3B45; font-size: 13px; font-weight: 600;">${course.name}</span>
+                                    ${course.instructors && course.instructors.length > 0 ? `<div style="color: #666; font-size: 11px; margin-top: 2px;">${course.instructors.join(', ')}</div>` : ''}
+                                </div>
+                            `).join('')}
+                        </div>
+                    </details>`
+                }
+            </div>
+        `;
+
+        document.getElementById('nav-results-content').innerHTML = resultsHTML;
+
+        const exportBtn = document.getElementById('export-excel');
+        if (exportBtn) {
+            exportBtn.addEventListener('click', exportToExcel);
+            exportBtn.addEventListener('mouseenter', function() {
+                this.style.background = '#218838';
+                this.style.transform = 'translateY(-2px)';
+                this.style.boxShadow = '0 4px 12px rgba(40,167,69,0.3)';
+            });
+            exportBtn.addEventListener('mouseleave', function() {
+                this.style.background = '#28A745';
+                this.style.transform = 'translateY(0)';
+                this.style.boxShadow = 'none';
+            });
+        }
+    }
+
+    // Wait for master panel to be ready, with retry logic
+    function waitForMasterPanel(callback, maxAttempts = 20, interval = 500) {
+        let attempts = 0;
+
+        const checkPanel = setInterval(() => {
+            attempts++;
+
+            if (window.canvasScriptPanel) {
+                clearInterval(checkPanel);
+                console.log(`Navigation Auditor: Master panel found after ${attempts} attempt(s)`);
+                callback();
+            } else if (attempts >= maxAttempts) {
+                clearInterval(checkPanel);
+                console.warn('Navigation Auditor: Master panel not found after maximum attempts. Script may not register properly.');
+                // Still try to create modal in case user wants to use it directly
+                createModal();
+            }
+        }, interval);
+    }
+
+    // Initialize
+    function init() {
+        console.log('Navigation Tools Auditor initializing...');
+
+        waitForMasterPanel(() => {
+            console.log('Master panel found, registering Navigation Auditor...');
+            window.canvasScriptPanel.register({
+                id: 'navigation-auditor',
+                name: 'Navigation Tools Auditor',
+                icon: '🧭',
+                description: 'Check if navigation tools (PantherBook, Simple Syllabus, Honorlock) are enabled and visible to students in course navigation menus.',
+                category: 'Audits',
+                buttonText: 'Open Auditor',
+                action: openModal,
+                closeAfterAction: false
+            });
+            console.log('Navigation Auditor registered with master panel');
+
+            // Create the modal after successful registration
+            createModal();
+            console.log('Navigation Auditor initialization complete');
+        });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+})();
