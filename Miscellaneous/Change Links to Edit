@@ -1,0 +1,173 @@
+// ==UserScript==
+// @name         Canvas | Course Content | Change Links to Edit
+// @version      2.0
+// @description  Changes item links in Assignments, Pages, Discussions, and Quizzes to open their edit pages directly, with toast notification for confirmation.
+// @author       ChatGPT & Claude (w/ tweaks from Alex C.)
+// @match        https://*.instructure.com/courses/*/assignments
+// @match        https://*.instructure.com/courses/*/pages
+// @match        https://*.instructure.com/courses/*/discussion_topics
+// @match        https://*.instructure.com/courses/*/quizzes
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // ─── Config ───────────────────────────────────────────────────────────────
+    // To add a new content type in the future, just add an entry here.
+    const CONTENT_TYPES = [
+        { name: 'assignment',  selector: 'a.ig-title' },
+        { name: 'page',        selector: '.wiki-page-link' },
+        { name: 'discussion',  selector: 'a[data-testid^="discussion-link-"]' },
+        { name: 'quiz',        selector: 'a.ig-title' }, // quizzes reuse .ig-title
+    ];
+
+    const TOAST_DURATION_MS   = 3000;
+    const BUTTON_RESET_MS     = 3000; // kept in sync with toast duration
+    const CANVAS_BLUE         = '#0374B5';
+    // ──────────────────────────────────────────────────────────────────────────
+
+    // ─── Toast ────────────────────────────────────────────────────────────────
+    function getOrCreateToastContainer() {
+        let container = document.getElementById('edit-links-toast-container');
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'edit-links-toast-container';
+            container.style.cssText = `
+                position: fixed;
+                bottom: 20px;
+                right: 20px;
+                z-index: 9999;
+                display: flex;
+                flex-direction: column;
+                align-items: flex-end;
+            `;
+            document.body.appendChild(container);
+        }
+        return container;
+    }
+
+    function showToast(message) {
+        const container = getOrCreateToastContainer();
+        const toast = document.createElement('div');
+        toast.style.cssText = `
+            background-color: ${CANVAS_BLUE};
+            color: white;
+            padding: 12px 20px;
+            border-radius: 4px;
+            margin-top: 10px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            opacity: 0;
+            transition: opacity 0.3s ease-in-out;
+            max-width: 300px;
+        `;
+        toast.innerHTML = message;
+        container.appendChild(toast);
+
+        setTimeout(() => { toast.style.opacity = '1'; }, 10);
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            setTimeout(() => toast.remove(), 300);
+        }, TOAST_DURATION_MS);
+    }
+    // ──────────────────────────────────────────────────────────────────────────
+
+    // ─── Core logic ───────────────────────────────────────────────────────────
+    function changeLinksToEditPages() {
+        let changedCount = 0;
+
+        // Collect all matching selectors from config (deduplicated)
+        const selectors = [...new Set(CONTENT_TYPES.map(ct => ct.selector))];
+
+        selectors.forEach(selector => {
+            document.querySelectorAll(selector).forEach(link => {
+                const href = link.getAttribute('href');
+                if (href && !href.endsWith('/edit')) {
+                    link.href = `${href}/edit`;
+
+                    if (!link.querySelector('.icon-edit')) {
+                        const icon = document.createElement('i');
+                        icon.className = 'icon-edit';
+                        icon.style.cssText = 'margin-left: 5px; font-size: 12px;';
+                        link.appendChild(icon);
+                    }
+
+                    changedCount++;
+                }
+            });
+        });
+
+        updateButton(changedCount);
+        showToast(`<strong>${changedCount} link${changedCount !== 1 ? 's' : ''}</strong> changed to edit mode 📝`);
+        return changedCount;
+    }
+    // ──────────────────────────────────────────────────────────────────────────
+
+    // ─── Button ───────────────────────────────────────────────────────────────
+    function updateButton(changedCount) {
+        const button = document.getElementById('change-links-to-edit-button');
+        if (!button) return;
+
+        button.textContent = `⚡ ${changedCount} Link${changedCount !== 1 ? 's' : ''} Changed!`;
+        button.style.setProperty('background-color', CANVAS_BLUE, 'important');
+        button.style.setProperty('color', '#fff', 'important');
+        button.dataset.completed = 'true';
+
+        setTimeout(() => {
+            button.textContent = '⚡ Change Links to Edit';
+            button.style.removeProperty('background-color');
+            button.style.removeProperty('color');
+            delete button.dataset.completed;
+        }, BUTTON_RESET_MS);
+    }
+
+    function createButton() {
+        if (document.getElementById('change-links-to-edit-button')) return;
+
+        const buttonContainer = document.querySelector('.right-of-crumbs');
+        if (!buttonContainer) return;
+
+        const button = document.createElement('a');
+        button.id = 'change-links-to-edit-button';
+        button.className = 'btn';
+        button.textContent = '⚡ Change Links to Edit';
+        button.style.cssText = `margin-left: 10px; border: 2px solid ${CANVAS_BLUE}; cursor: pointer; transition: background-color 0.2s ease;`;
+
+        button.addEventListener('mouseenter', function() {
+            if (!this.dataset.completed) this.style.setProperty('background-color', '#e8e8e8', 'important');
+        });
+        button.addEventListener('mouseleave', function() {
+            if (!this.dataset.completed) this.style.removeProperty('background-color');
+        });
+        button.addEventListener('click', changeLinksToEditPages);
+
+        buttonContainer.appendChild(button);
+    }
+    // ──────────────────────────────────────────────────────────────────────────
+
+    // ─── Init ─────────────────────────────────────────────────────────────────
+    function init() {
+        createButton();
+
+        const observer = new MutationObserver(function(mutations, obs) {
+            if (!document.getElementById('change-links-to-edit-button') &&
+                document.querySelector('.right-of-crumbs')) {
+                createButton();
+            }
+            // Stop observing once button is placed
+            if (document.getElementById('change-links-to-edit-button')) {
+                obs.disconnect();
+            }
+        });
+
+        observer.observe(document.body, { childList: true, subtree: true });
+
+        window.addEventListener('load', function() {
+            createButton();
+            observer.disconnect();
+        }, { once: true });
+    }
+
+    init();
+    // ──────────────────────────────────────────────────────────────────────────
+})();
