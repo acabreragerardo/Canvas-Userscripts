@@ -1,0 +1,1152 @@
+// ==UserScript==
+// @name         Canvas | Assignments | Assignment Analytics
+// @version      5.0
+// @description  Adds a button to display assignment statistics with tabbed interface and sortable tables
+// @author       Alex but really it's Claude
+// @match        https://*.instructure.com/courses/*/assignments
+// @run-at       document-idle
+// @noframes
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    let currentTab = 'groups';
+    let sortStates = {}; // Track sort state per group/category
+
+    // Main initialization
+    function init() {
+        if (!window.location.pathname.includes('/assignments')) {
+            return;
+        }
+        addStyles();
+        addButton();
+    }
+
+    function addStyles() {
+        const style = document.createElement('style');
+        style.textContent = `
+            .assignment-stats-modal {
+                position: fixed;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                background: white;
+                padding: 20px;
+                border-radius: 8px;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+                z-index: 10000;
+                min-width: 900px;
+                max-width: 95%;
+                max-height: 85vh;
+                overflow-y: auto;
+            }
+
+            .assignment-stats-modal h3 {
+                margin-top: 0;
+                color: #0374B5;
+                border-bottom: 1px solid #eee;
+                padding-bottom: 10px;
+            }
+
+            .assignment-stats-modal .close-button {
+                position: absolute;
+                top: 10px;
+                right: 10px;
+                background: none;
+                border: none;
+                font-size: 20px;
+                cursor: pointer;
+                color: #888;
+            }
+
+            .assignment-stats-modal .close-button:hover {
+                color: #333;
+            }
+
+            .assignment-stats-modal .stats-summary {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 12px;
+                margin-bottom: 20px;
+                padding-bottom: 20px;
+                border-bottom: 2px solid #ddd;
+            }
+
+            .assignment-stats-modal .stat-box {
+                padding: 12px;
+                background: #f9f9f9;
+                border-radius: 6px;
+                border-left: 3px solid #0374B5;
+            }
+
+            .assignment-stats-modal .stat-value {
+                display: block;
+                font-size: 22px;
+                font-weight: bold;
+                color: #0374B5;
+                margin-bottom: 4px;
+            }
+
+            .assignment-stats-modal .stat-label {
+                color: #555;
+                font-size: 13px;
+                margin-bottom: 8px;
+            }
+
+            .assignment-stats-modal .stat-details {
+                font-size: 13px;
+                color: #555;
+                margin-top: 8px;
+                line-height: 1.4;
+            }
+
+            .assignment-stats-modal .stat-details ul {
+                margin: 0;
+                padding-left: 18px;
+            }
+
+            .assignment-stats-modal .weight-warning {
+                color: #C23C2A;
+                font-weight: bold;
+            }
+
+            .assignment-stats-modal .weight-good {
+                color: #0B874B;
+                font-weight: bold;
+            }
+
+            .tab-container {
+                margin-bottom: 15px;
+                border-bottom: 2px solid #ddd;
+            }
+
+            .tab-button {
+                padding: 10px 20px;
+                border: none;
+                background: #f5f5f5;
+                color: #333;
+                cursor: pointer;
+                margin-right: 5px;
+                border-radius: 4px 4px 0 0;
+                font-weight: normal;
+                transition: background-color 0.2s;
+            }
+
+            .tab-button.active {
+                background: #0374B5;
+                color: white;
+                font-weight: bold;
+            }
+
+            .tab-button:not(.active):hover {
+                background: #e0e0e0;
+            }
+
+            .tab-content {
+                display: none;
+            }
+
+            .tab-content.active {
+                display: block;
+            }
+
+            .group-section {
+                margin-bottom: 30px;
+            }
+
+            .group-header {
+                background: #f5f5f5;
+                padding: 12px 15px;
+                border-radius: 6px 6px 0 0;
+                border-left: 4px solid #0374B5;
+                margin-bottom: 0;
+            }
+
+            .group-title {
+                font-size: 16px;
+                font-weight: bold;
+                color: #0374B5;
+                margin: 0;
+            }
+
+            .group-weight {
+                font-size: 14px;
+                color: #666;
+                font-weight: normal;
+                margin-left: 8px;
+            }
+
+            .group-stats {
+                font-size: 13px;
+                color: #666;
+                margin-top: 4px;
+            }
+
+            .group-rules {
+                font-size: 12px;
+                color: #856404;
+                background: #fff3cd;
+                padding: 4px 8px;
+                border-radius: 3px;
+                display: inline-block;
+                margin-top: 4px;
+            }
+
+            .assignments-table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 13px;
+                margin-bottom: 20px;
+            }
+
+            .assignments-table thead {
+                background: #e8f4f9;
+                border-bottom: 2px solid #0374B5;
+            }
+
+            .assignments-table th {
+                padding: 10px;
+                text-align: left;
+                border: 1px solid #ddd;
+                cursor: pointer;
+                user-select: none;
+                font-weight: bold;
+                color: #333;
+            }
+
+            .assignments-table th:hover {
+                background: #d0e8f2;
+            }
+
+            .assignments-table td {
+                padding: 10px;
+                border: 1px solid #ddd;
+            }
+
+            .assignments-table tbody tr {
+                background: white;
+            }
+
+            .assignments-table tbody tr:nth-child(even) {
+                background: #f9f9f9;
+            }
+
+            .assignments-table tbody tr.unpublished {
+                background: #fff5f5;
+            }
+
+            .assignments-table tbody tr.unpublished:nth-child(even) {
+                background: #ffe8e8;
+            }
+
+            .assignment-link {
+                color: #0374B5;
+                text-decoration: none;
+            }
+
+            .assignment-link:hover {
+                text-decoration: underline;
+            }
+
+            .type-badge {
+                display: inline-block;
+                padding: 2px 8px;
+                border-radius: 3px;
+                font-size: 11px;
+                font-weight: bold;
+                background: #e8f4f9;
+                color: #0374B5;
+            }
+
+            .published-indicator {
+                font-weight: bold;
+                font-size: 16px;
+            }
+
+            .published-yes {
+                color: #0B874B;
+            }
+
+            .published-no {
+                color: #C23C2A;
+            }
+
+            .sort-arrow {
+                margin-left: 4px;
+                font-size: 10px;
+            }
+
+            .assignment-stats-overlay {
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0,0,0,0.5);
+                z-index: 9999;
+            }
+
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+
+            .btn-loading {
+                position: relative;
+                color: transparent !important;
+            }
+
+            .btn-loading::after {
+                content: '';
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                width: 16px;
+                height: 16px;
+                margin-top: -8px;
+                margin-left: -8px;
+                border-radius: 50%;
+                border: 2px solid rgba(255, 255, 255, 0.3);
+                border-top-color: white;
+                animation: spin 0.8s infinite linear;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    function addButton() {
+        if (document.querySelector('.btn-top-nav[href="javascript:void(0);"]')) {
+            return;
+        }
+
+        const rightOfCrumbs = document.querySelector('.right-of-crumbs');
+        if (!rightOfCrumbs) {
+            addButtonAlternative();
+            return;
+        }
+
+        const button = document.createElement('a');
+        button.className = 'btn btn-top-nav';
+        button.style.cssText = 'margin-left: 10px; border: 2px solid #0374B5; transition: background-color 0.2s ease;';
+        button.href = 'javascript:void(0);';
+        button.innerHTML = '⚡Assignment Analytics';
+
+        button.addEventListener('mouseenter', function() {
+            this.style.setProperty('background-color', '#e8e8e8', 'important');
+        });
+        button.addEventListener('mouseleave', function() {
+            this.style.setProperty('background-color', '', '');
+        });
+
+        button.addEventListener('click', function(event) {
+            event.preventDefault();
+            this.classList.add('btn-loading');
+            fetchAssignmentData(this);
+        });
+
+        rightOfCrumbs.appendChild(button);
+    }
+
+    function addButtonAlternative() {
+        const headerBar = document.querySelector('.header-bar-right');
+        const buttonContainer = document.querySelector('.header-bar-right__buttons');
+
+        let targetElement = buttonContainer || headerBar;
+
+        if (!targetElement) {
+            const heading = document.querySelector('h1');
+            if (heading) {
+                const container = document.createElement('div');
+                container.style.marginBottom = '20px';
+                heading.parentNode.insertBefore(container, heading.nextSibling);
+                targetElement = container;
+            }
+        }
+
+        if (!targetElement) {
+            console.error('Could not find a place to add the button');
+            return;
+        }
+
+        const button = document.createElement('a');
+        button.className = 'btn';
+        button.style.cssText = 'border: 2px solid #0374B5; transition: background-color 0.2s ease;';
+        button.href = 'javascript:void(0);';
+        button.innerHTML = '⚡Assignment Analytics';
+
+        button.addEventListener('mouseenter', function() {
+            this.style.setProperty('background-color', '#e8e8e8', 'important');
+        });
+        button.addEventListener('mouseleave', function() {
+            this.style.setProperty('background-color', '', '');
+        });
+
+        button.addEventListener('click', function(event) {
+            event.preventDefault();
+            this.classList.add('btn-loading');
+            fetchAssignmentData(this);
+        });
+
+        targetElement.appendChild(button);
+    }
+
+    function fetchAssignmentData(button) {
+        const courseId = window.location.pathname.match(/\/courses\/(\d+)/)?.[1];
+        if (!courseId) {
+            showStatsModal('Error', { error: 'Could not determine course ID' });
+            button.classList.remove('btn-loading');
+            return;
+        }
+
+        const baseUrl = window.location.origin;
+        const assignmentsUrl = `${baseUrl}/api/v1/courses/${courseId}/assignments?per_page=100`;
+        const groupCategoriesUrl = `${baseUrl}/api/v1/courses/${courseId}/group_categories`;
+        const assignmentGroupsUrl = `${baseUrl}/api/v1/courses/${courseId}/assignment_groups?include[]=assignments&include[]=submission&override_assignment_dates=true&per_page=100`;
+        const courseUrl = `${baseUrl}/api/v1/courses/${courseId}`;
+
+        Promise.all([
+            fetchAllPages(assignmentsUrl),
+            fetchAllPages(groupCategoriesUrl),
+            fetchAllPages(assignmentGroupsUrl),
+            fetch(courseUrl, { credentials: 'include' }).then(r => r.json())
+        ])
+        .then(([assignments, groupCategories, assignmentGroups, course]) => {
+            const processedData = processAssignmentData(assignments, groupCategories, assignmentGroups, course);
+            showStatsModal('Assignment Statistics', processedData);
+            button.classList.remove('btn-loading');
+        })
+        .catch(error => {
+            console.error('Error fetching data:', error);
+            showStatsModal('Error', { error: 'Failed to fetch assignment data: ' + error.message });
+            button.classList.remove('btn-loading');
+        });
+    }
+
+    async function fetchAllPages(url, allItems = []) {
+        try {
+            const response = await fetch(url, { credentials: 'include' });
+
+            if (!response.ok) {
+                throw new Error(`API request failed with status ${response.status}`);
+            }
+
+            const text = await response.text();
+            const jsonText = text.startsWith('while(1);') ? text.replace('while(1);', '') : text;
+            const data = JSON.parse(jsonText);
+
+            allItems = [...allItems, ...data];
+
+            const linkHeader = response.headers.get('Link');
+            if (linkHeader && linkHeader.includes('rel="next"')) {
+                const nextUrl = linkHeader.match(/<([^>]+)>;\s*rel="next"/)?.[1];
+                if (nextUrl) {
+                    return fetchAllPages(nextUrl, allItems);
+                }
+            }
+
+            return allItems;
+        } catch (error) {
+            console.error('Error in fetchAllPages:', error);
+            throw error;
+        }
+    }
+
+    function processAssignmentData(assignments, groupCategories, assignmentGroups, course) {
+        const groupCategoryMap = {};
+        groupCategories.forEach(category => {
+            groupCategoryMap[category.id] = category.name;
+        });
+
+        const assignmentMap = {};
+        assignments.forEach(assignment => {
+            assignmentMap[assignment.id] = assignment;
+        });
+
+        let totalPoints = 0;
+        let totalAssignments = assignments.length;
+        let publishedAssignments = 0;
+        let unpublishedAssignments = 0;
+
+        const assignmentTypeCounts = {
+            'Assignments': 0,
+            'Quizzes': 0,
+            'Discussions': 0,
+            'External Tools': 0
+        };
+
+        const pointsByType = {
+            'Assignments': 0,
+            'Quizzes': 0,
+            'Discussions': 0,
+            'External Tools': 0
+        };
+
+        const groupAssignments = [];
+        let groupAssignmentsPoints = 0;
+
+        assignments.forEach(assignment => {
+            if (assignment.published) {
+                publishedAssignments++;
+                if (!assignment.omit_from_final_grade && assignment.points_possible) {
+                    totalPoints += assignment.points_possible;
+                }
+            } else {
+                unpublishedAssignments++;
+            }
+
+            let assignmentType = "Assignments";
+
+            if (assignment.is_quiz_assignment ||
+                (assignment.submission_types &&
+                 assignment.submission_types.includes('online_quiz'))) {
+                assignmentType = "Quizzes";
+            }
+            else if (assignment.discussion_topic ||
+                    (assignment.submission_types &&
+                     assignment.submission_types.includes('discussion_topic'))) {
+                assignmentType = "Discussions";
+            }
+            else if (assignment.external_tool_tag_attributes ||
+                    (assignment.submission_types &&
+                     assignment.submission_types.includes('external_tool'))) {
+                assignmentType = "External Tools";
+            }
+
+            assignmentTypeCounts[assignmentType]++;
+
+            if (assignment.published && assignment.points_possible) {
+                pointsByType[assignmentType] += assignment.points_possible;
+            }
+
+            if (assignment.group_category_id) {
+                groupAssignments.push({
+                    id: assignment.id,
+                    name: assignment.name,
+                    url: assignment.html_url,
+                    published: assignment.published,
+                    points_possible: assignment.points_possible || 0,
+                    group_category_id: assignment.group_category_id,
+                    group_category_name: groupCategoryMap[assignment.group_category_id] || 'Unknown Group Set',
+                    type: assignmentType,
+                    due_at: assignment.due_at
+                });
+
+                if (assignment.published && assignment.points_possible) {
+                    groupAssignmentsPoints += assignment.points_possible;
+                }
+            }
+        });
+
+        const processedGroups = [];
+        let totalWeight = 0;
+        // Check if course actually has weighted grading enabled
+        let hasWeights = course && course.apply_assignment_group_weights === true;
+
+        assignmentGroups.forEach(group => {
+            if (!group.assignments || group.assignments.length === 0) return;
+
+            const groupAssignments = [];
+            let groupPointsTotal = 0;
+            let publishedCount = 0;
+
+            group.assignments.forEach(assignment => {
+                if (assignmentMap[assignment.id]) {
+                    let assignmentType = 'Assignment';
+
+                    if (assignment.is_quiz_assignment ||
+                        (assignment.submission_types &&
+                         assignment.submission_types.includes('online_quiz'))) {
+                        assignmentType = 'Quiz';
+                    } else if (assignment.discussion_topic ||
+                              (assignment.submission_types &&
+                               assignment.submission_types.includes('discussion_topic'))) {
+                        assignmentType = 'Discussion';
+                    } else if (assignment.external_tool_tag_attributes ||
+                              (assignment.submission_types &&
+                               assignment.submission_types.includes('external_tool'))) {
+                        assignmentType = 'External Tool';
+                    }
+
+                    groupAssignments.push({
+                        id: assignment.id,
+                        name: assignment.name,
+                        url: assignment.html_url,
+                        published: assignment.published,
+                        points_possible: assignment.points_possible || 0,
+                        due_at: assignment.due_at,
+                        type: assignmentType
+                    });
+
+                    if (assignment.published) {
+                        publishedCount++;
+                        if (assignment.points_possible) {
+                            groupPointsTotal += assignment.points_possible;
+                        }
+                    }
+                }
+            });
+
+            const groupWeight = group.group_weight || 0;
+            totalWeight += groupWeight;
+
+            processedGroups.push({
+                id: group.id,
+                name: group.name,
+                weight: groupWeight,
+                rules: group.rules || {},
+                assignments: groupAssignments,
+                pointsTotal: groupPointsTotal,
+                count: groupAssignments.length,
+                publishedCount: publishedCount
+            });
+        });
+
+        const groupedByCategory = {};
+        groupAssignments.forEach(assignment => {
+            if (!groupedByCategory[assignment.group_category_name]) {
+                groupedByCategory[assignment.group_category_name] = [];
+            }
+            groupedByCategory[assignment.group_category_name].push(assignment);
+        });
+
+        return {
+            totalPoints: totalPoints.toFixed(2),
+            totalAssignments,
+            publishedAssignments,
+            unpublishedAssignments,
+            assignmentTypeCounts,
+            pointsByType,
+            assignmentGroups: processedGroups,
+            groupAssignments: groupAssignments.length,
+            groupAssignmentsPoints,
+            groupedByCategory,
+            totalWeight: totalWeight,
+            hasWeights: hasWeights
+        };
+    }
+
+    function showStatsModal(title, data) {
+        const existingModal = document.querySelector('.assignment-stats-modal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        const existingOverlay = document.querySelector('.assignment-stats-overlay');
+        if (existingOverlay) {
+            existingOverlay.remove();
+        }
+
+        const overlay = document.createElement('div');
+        overlay.className = 'assignment-stats-overlay';
+        document.body.appendChild(overlay);
+
+        const modal = document.createElement('div');
+        modal.className = 'assignment-stats-modal';
+
+        const closeButton = document.createElement('button');
+        closeButton.className = 'close-button';
+        closeButton.innerHTML = '&times;';
+        closeButton.addEventListener('click', function() {
+            modal.remove();
+            overlay.remove();
+        });
+
+        const modalTitle = document.createElement('h3');
+        modalTitle.textContent = title;
+
+        modal.appendChild(closeButton);
+        modal.appendChild(modalTitle);
+
+        if (data.error) {
+            const errorMessage = document.createElement('p');
+            errorMessage.textContent = data.error;
+            errorMessage.style.color = '#C23C2A';
+            modal.appendChild(errorMessage);
+        } else {
+            // Stats summary (always visible)
+            const statsSection = createStatsSection(data);
+            modal.appendChild(statsSection);
+
+            // Tab navigation
+            const tabContainer = document.createElement('div');
+            tabContainer.className = 'tab-container';
+
+            const groupsTab = document.createElement('button');
+            groupsTab.className = 'tab-button active';
+            groupsTab.textContent = 'Assignment Groups';
+            groupsTab.onclick = () => switchTab('groups', tabContainer, modal, data);
+
+            tabContainer.appendChild(groupsTab);
+
+            // Only add Group Assignments tab if they exist
+            if (Object.keys(data.groupedByCategory).length > 0) {
+                const groupAssignmentsTab = document.createElement('button');
+                groupAssignmentsTab.className = 'tab-button';
+                groupAssignmentsTab.textContent = 'Group Assignments';
+                groupAssignmentsTab.onclick = () => switchTab('groupAssignments', tabContainer, modal, data);
+                tabContainer.appendChild(groupAssignmentsTab);
+            }
+
+            modal.appendChild(tabContainer);
+
+            // Tab content containers
+            const groupsContent = document.createElement('div');
+            groupsContent.className = 'tab-content active';
+            groupsContent.id = 'groups-tab';
+            createAssignmentGroupsTables(groupsContent, data.assignmentGroups);
+            modal.appendChild(groupsContent);
+
+            if (Object.keys(data.groupedByCategory).length > 0) {
+                const groupAssignmentsContent = document.createElement('div');
+                groupAssignmentsContent.className = 'tab-content';
+                groupAssignmentsContent.id = 'groupAssignments-tab';
+                createGroupAssignmentsTables(groupAssignmentsContent, data.groupedByCategory);
+                modal.appendChild(groupAssignmentsContent);
+            }
+        }
+
+        document.body.appendChild(modal);
+
+        overlay.addEventListener('click', function() {
+            modal.remove();
+            overlay.remove();
+        });
+    }
+
+    function createStatsSection(data) {
+        const statsSection = document.createElement('div');
+        statsSection.className = 'stats-summary';
+
+        // Total Points
+        const pointsBox = document.createElement('div');
+        pointsBox.className = 'stat-box';
+
+        const pointsValue = document.createElement('span');
+        pointsValue.className = 'stat-value';
+        pointsValue.textContent = data.totalPoints;
+
+        const pointsLabel = document.createElement('span');
+        pointsLabel.className = 'stat-label';
+        pointsLabel.textContent = 'Total Points (Published)';
+
+        pointsBox.appendChild(pointsValue);
+        pointsBox.appendChild(pointsLabel);
+
+        if (data.hasWeights) {
+            const weightDetails = document.createElement('div');
+            weightDetails.className = 'stat-details';
+
+            const weightText = document.createElement('div');
+            weightText.textContent = `Assignment Groups Weight: ${data.totalWeight.toFixed(1)}%`;
+
+            const weightStatus = document.createElement('div');
+            if (data.totalWeight === 100) {
+                weightStatus.className = 'weight-good';
+                weightStatus.textContent = '✓ Weights sum to 100%';
+            } else if (data.totalWeight > 100) {
+                weightStatus.className = 'weight-warning';
+                weightStatus.innerHTML = `⚠ Weights exceed 100% (+${(data.totalWeight - 100).toFixed(1)}%)<br>May be intentional (extra credit)`;
+            } else {
+                weightStatus.className = 'weight-warning';
+                weightStatus.textContent = `⚠ Weights under 100% (-${(100 - data.totalWeight).toFixed(1)}%)`;
+            }
+
+            weightDetails.appendChild(weightText);
+            weightDetails.appendChild(weightStatus);
+            pointsBox.appendChild(weightDetails);
+        }
+
+        statsSection.appendChild(pointsBox);
+
+        // Published Assignments
+        const publishedBox = document.createElement('div');
+        publishedBox.className = 'stat-box';
+
+        const publishedValue = document.createElement('span');
+        publishedValue.className = 'stat-value';
+        publishedValue.textContent = `${data.publishedAssignments}/${data.totalAssignments}`;
+
+        const publishedLabel = document.createElement('span');
+        publishedLabel.className = 'stat-label';
+        publishedLabel.textContent = 'Published Assignments';
+
+        const typesList = document.createElement('div');
+        typesList.className = 'stat-details';
+
+        const ul = document.createElement('ul');
+        ul.innerHTML = `
+            <li>Assignments: ${data.assignmentTypeCounts.Assignments}</li>
+            <li>Quizzes: ${data.assignmentTypeCounts.Quizzes}</li>
+            <li>Discussions: ${data.assignmentTypeCounts.Discussions}</li>
+            <li>External Tools: ${data.assignmentTypeCounts['External Tools']}</li>
+        `;
+
+        typesList.appendChild(ul);
+
+        publishedBox.appendChild(publishedValue);
+        publishedBox.appendChild(publishedLabel);
+        publishedBox.appendChild(typesList);
+
+        statsSection.appendChild(publishedBox);
+
+        // Group Assignments (if any)
+        if (data.groupAssignments > 0) {
+            const groupBox = document.createElement('div');
+            groupBox.className = 'stat-box';
+
+            const groupValue = document.createElement('span');
+            groupValue.className = 'stat-value';
+            groupValue.textContent = data.groupAssignments;
+
+            const groupLabel = document.createElement('span');
+            groupLabel.className = 'stat-label';
+            groupLabel.textContent = 'Group Assignments';
+
+            const groupPoints = document.createElement('div');
+            groupPoints.className = 'stat-details';
+            groupPoints.textContent = `Total points: ${data.groupAssignmentsPoints.toFixed(2)}`;
+
+            groupBox.appendChild(groupValue);
+            groupBox.appendChild(groupLabel);
+            groupBox.appendChild(groupPoints);
+
+            statsSection.appendChild(groupBox);
+        }
+
+        return statsSection;
+    }
+
+    function switchTab(tabName, tabContainer, modal, data) {
+        currentTab = tabName;
+
+        // Update tab buttons
+        tabContainer.querySelectorAll('.tab-button').forEach(btn => {
+            btn.classList.remove('active');
+        });
+        event.target.classList.add('active');
+
+        // Update tab content
+        modal.querySelectorAll('.tab-content').forEach(content => {
+            content.classList.remove('active');
+        });
+        modal.querySelector(`#${tabName}-tab`).classList.add('active');
+    }
+
+    function createAssignmentGroupsTables(container, groups) {
+        groups.forEach(group => {
+            const section = document.createElement('div');
+            section.className = 'group-section';
+
+            const header = document.createElement('div');
+            header.className = 'group-header';
+
+            const titleDiv = document.createElement('div');
+            titleDiv.className = 'group-title';
+            titleDiv.textContent = group.name;
+
+            if (group.weight > 0) {
+                const weightSpan = document.createElement('span');
+                weightSpan.className = 'group-weight';
+                weightSpan.textContent = `(${group.weight}% of grade)`;
+                titleDiv.appendChild(weightSpan);
+            }
+
+            const statsDiv = document.createElement('div');
+            statsDiv.className = 'group-stats';
+            statsDiv.textContent = `${group.publishedCount}/${group.count} published · ${group.pointsTotal.toFixed(2)} pts`;
+
+            header.appendChild(titleDiv);
+            header.appendChild(statsDiv);
+
+            // Add rules if any
+            if (group.rules && Object.keys(group.rules).length > 0) {
+                const rulesDiv = document.createElement('div');
+                rulesDiv.className = 'group-rules';
+                const rulesParts = [];
+
+                if (group.rules.drop_lowest) {
+                    rulesParts.push(`Drops ${group.rules.drop_lowest} lowest`);
+                }
+                if (group.rules.drop_highest) {
+                    rulesParts.push(`Drops ${group.rules.drop_highest} highest`);
+                }
+                if (group.rules.never_drop && group.rules.never_drop.length > 0) {
+                    rulesParts.push(`Never drops: ${group.rules.never_drop.length} assignment(s)`);
+                }
+
+                if (rulesParts.length > 0) {
+                    rulesDiv.textContent = rulesParts.join(' · ');
+                    header.appendChild(rulesDiv);
+                }
+            }
+
+            section.appendChild(header);
+
+            // Create table
+            const table = createSortableTable(group.assignments, `group-${group.id}`);
+            section.appendChild(table);
+
+            container.appendChild(section);
+        });
+    }
+
+    function createGroupAssignmentsTables(container, groupedByCategory) {
+        Object.keys(groupedByCategory).sort().forEach(categoryName => {
+            const assignments = groupedByCategory[categoryName];
+
+            const section = document.createElement('div');
+            section.className = 'group-section';
+
+            const header = document.createElement('div');
+            header.className = 'group-header';
+
+            const titleDiv = document.createElement('div');
+            titleDiv.className = 'group-title';
+            titleDiv.textContent = categoryName;
+
+            const publishedCount = assignments.filter(a => a.published).length;
+            const totalPoints = assignments.reduce((sum, a) => a.published ? sum + a.points_possible : sum, 0);
+
+            const statsDiv = document.createElement('div');
+            statsDiv.className = 'group-stats';
+            statsDiv.textContent = `${publishedCount}/${assignments.length} published · ${totalPoints.toFixed(2)} pts`;
+
+            header.appendChild(titleDiv);
+            header.appendChild(statsDiv);
+
+            section.appendChild(header);
+
+            // Create table
+            const table = createSortableTable(assignments, `category-${categoryName.replace(/\s+/g, '-')}`);
+            section.appendChild(table);
+
+            container.appendChild(section);
+        });
+    }
+
+    function createSortableTable(assignments, tableId) {
+        const table = document.createElement('table');
+        table.className = 'assignments-table';
+        table.dataset.tableId = tableId;
+
+        // Initialize sort state if not exists
+        if (!sortStates[tableId]) {
+            sortStates[tableId] = { column: 'name', direction: 'asc' };
+        }
+
+        const thead = document.createElement('thead');
+        thead.innerHTML = `
+            <tr>
+                <th data-sort="name">Assignment Name${getSortArrow(tableId, 'name')}</th>
+                <th data-sort="type">Type${getSortArrow(tableId, 'type')}</th>
+                <th data-sort="published">Published${getSortArrow(tableId, 'published')}</th>
+                <th data-sort="points">Points${getSortArrow(tableId, 'points')}</th>
+                <th data-sort="due">Due Date${getSortArrow(tableId, 'due')}</th>
+            </tr>
+        `;
+
+        // Add click handlers for sorting
+        thead.querySelectorAll('th[data-sort]').forEach(th => {
+            th.onclick = () => {
+                const column = th.dataset.sort;
+                sortTableBy(table, tableId, column, assignments);
+            };
+        });
+
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+
+        // Sort assignments based on current sort state
+        const sortedAssignments = sortAssignments([...assignments], tableId);
+
+        sortedAssignments.forEach(assignment => {
+            const row = document.createElement('tr');
+            if (!assignment.published) {
+                row.classList.add('unpublished');
+            }
+
+            const nameCell = document.createElement('td');
+            const link = document.createElement('a');
+            link.href = assignment.url;
+            link.className = 'assignment-link';
+            link.textContent = assignment.name;
+            link.target = '_blank';
+            nameCell.appendChild(link);
+
+            const typeCell = document.createElement('td');
+            const typeBadge = document.createElement('span');
+            typeBadge.className = 'type-badge';
+            typeBadge.textContent = assignment.type;
+            typeCell.appendChild(typeBadge);
+
+            const publishedCell = document.createElement('td');
+            const publishedIndicator = document.createElement('span');
+            publishedIndicator.className = `published-indicator ${assignment.published ? 'published-yes' : 'published-no'}`;
+            publishedIndicator.textContent = assignment.published ? '✓' : '✗';
+            publishedCell.appendChild(publishedIndicator);
+
+            const pointsCell = document.createElement('td');
+            pointsCell.textContent = assignment.points_possible || '0';
+
+            const dueCell = document.createElement('td');
+            if (assignment.due_at) {
+                const dueDate = new Date(assignment.due_at);
+                dueCell.textContent = dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+            } else {
+                dueCell.textContent = 'N/A';
+            }
+
+            row.appendChild(nameCell);
+            row.appendChild(typeCell);
+            row.appendChild(publishedCell);
+            row.appendChild(pointsCell);
+            row.appendChild(dueCell);
+
+            tbody.appendChild(row);
+        });
+
+        table.appendChild(tbody);
+        return table;
+    }
+
+    function getSortArrow(tableId, column) {
+        const state = sortStates[tableId];
+        if (state.column === column) {
+            return `<span class="sort-arrow">${state.direction === 'asc' ? '▲' : '▼'}</span>`;
+        }
+        return '';
+    }
+
+    function sortTableBy(table, tableId, column, assignments) {
+        const state = sortStates[tableId];
+
+        // Toggle direction if same column, otherwise reset to asc
+        if (state.column === column) {
+            state.direction = state.direction === 'asc' ? 'desc' : 'asc';
+        } else {
+            state.column = column;
+            state.direction = 'asc';
+        }
+
+        // Re-render table
+        const sortedAssignments = sortAssignments([...assignments], tableId);
+        const tbody = table.querySelector('tbody');
+        tbody.innerHTML = '';
+
+        sortedAssignments.forEach(assignment => {
+            const row = document.createElement('tr');
+            if (!assignment.published) {
+                row.classList.add('unpublished');
+            }
+
+            const nameCell = document.createElement('td');
+            const link = document.createElement('a');
+            link.href = assignment.url;
+            link.className = 'assignment-link';
+            link.textContent = assignment.name;
+            link.target = '_blank';
+            nameCell.appendChild(link);
+
+            const typeCell = document.createElement('td');
+            const typeBadge = document.createElement('span');
+            typeBadge.className = 'type-badge';
+            typeBadge.textContent = assignment.type;
+            typeCell.appendChild(typeBadge);
+
+            const publishedCell = document.createElement('td');
+            const publishedIndicator = document.createElement('span');
+            publishedIndicator.className = `published-indicator ${assignment.published ? 'published-yes' : 'published-no'}`;
+            publishedIndicator.textContent = assignment.published ? '✓' : '✗';
+            publishedCell.appendChild(publishedIndicator);
+
+            const pointsCell = document.createElement('td');
+            pointsCell.textContent = assignment.points_possible || '0';
+
+            const dueCell = document.createElement('td');
+            if (assignment.due_at) {
+                const dueDate = new Date(assignment.due_at);
+                dueCell.textContent = dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+            } else {
+                dueCell.textContent = 'N/A';
+            }
+
+            row.appendChild(nameCell);
+            row.appendChild(typeCell);
+            row.appendChild(publishedCell);
+            row.appendChild(pointsCell);
+            row.appendChild(dueCell);
+
+            tbody.appendChild(row);
+        });
+
+        // Update header arrows
+        const thead = table.querySelector('thead');
+        thead.querySelectorAll('th[data-sort]').forEach(th => {
+            const col = th.dataset.sort;
+            const arrow = getSortArrow(tableId, col);
+            const text = th.textContent.replace(/[▲▼]/g, '').trim();
+            th.innerHTML = text + arrow;
+        });
+    }
+
+    function sortAssignments(assignments, tableId) {
+        const state = sortStates[tableId];
+        const { column, direction } = state;
+
+        assignments.sort((a, b) => {
+            let valA, valB;
+
+            switch(column) {
+                case 'name':
+                    valA = a.name.toLowerCase();
+                    valB = b.name.toLowerCase();
+                    break;
+                case 'type':
+                    valA = a.type.toLowerCase();
+                    valB = b.type.toLowerCase();
+                    break;
+                case 'published':
+                    valA = a.published ? 1 : 0;
+                    valB = b.published ? 1 : 0;
+                    break;
+                case 'points':
+                    valA = a.points_possible || 0;
+                    valB = b.points_possible || 0;
+                    break;
+                case 'due':
+                    valA = a.due_at ? new Date(a.due_at).getTime() : 0;
+                    valB = b.due_at ? new Date(b.due_at).getTime() : 0;
+                    break;
+                default:
+                    return 0;
+            }
+
+            if (valA < valB) return direction === 'asc' ? -1 : 1;
+            if (valA > valB) return direction === 'asc' ? 1 : -1;
+            return 0;
+        });
+
+        return assignments;
+    }
+
+    // Initialize when DOM is ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+    // Also run when navigating via AJAX (Canvas uses AJAX navigation)
+    let lastUrl = location.href;
+    new MutationObserver(() => {
+        const url = location.href;
+        if (url !== lastUrl) {
+            lastUrl = url;
+            setTimeout(init, 500);
+        }
+    }).observe(document, { subtree: true, childList: true });
+
+})();
