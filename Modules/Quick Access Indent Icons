@@ -1,0 +1,112 @@
+// ==UserScript==
+// @name         Canvas | Modules | Quick Access Indent Icons
+// @namespace    https://github.com/redice44
+// @version      0.1.1
+// @description  Adds Indent Icons to Module Items
+// @author       Matt Thomson, tweaked slightly by Alex & Claude
+// @match        https://*.instructure.com/courses/*/modules
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+(function() {
+  'use strict';
+
+  // Add custom styles to improve button appearance and fix Ally spacing
+  const style = document.createElement('style');
+  style.textContent = `
+    .quick-indent-controls {
+      display: inline-flex;
+      gap: 4px;
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+    .quick-indent-controls a {
+      display: inline-flex;
+      align-items: center;
+    }
+  `;
+  document.head.appendChild(style);
+
+  function addIndentButtons() {
+    const moduleItems = document.querySelectorAll('ul.ig-list > li.context_module_item');
+
+    for (let i = 0; i < moduleItems.length; i++) {
+      // Skip if already processed
+      if (moduleItems[i].querySelector('.quick-indent-controls')) {
+        continue;
+      }
+
+      const admin = moduleItems[i].querySelector('.ig-admin');
+      if (!admin) continue;
+
+      const outdentLink = admin.querySelector('ul.al-options a.outdent_item_link');
+      const indentLink = admin.querySelector('ul.al-options a.indent_item_link');
+
+      if (!outdentLink || !indentLink) continue;
+
+      // Clone the buttons
+      const decIndent = outdentLink.cloneNode(true);
+      const incIndent = indentLink.cloneNode(true);
+
+      // Remove text nodes (keep only the icon)
+      Array.from(decIndent.childNodes).forEach(node => {
+        if (node.nodeType === Node.TEXT_NODE && node.textContent.trim()) {
+          node.remove();
+        }
+      });
+
+      Array.from(incIndent.childNodes).forEach(node => {
+        if (node.nodeType === Node.TEXT_NODE && node.textContent.trim()) {
+          node.remove();
+        }
+      });
+
+      // Create a wrapper for both buttons
+      const wrapper = document.createElement('span');
+      wrapper.className = 'quick-indent-controls';
+      wrapper.appendChild(decIndent);
+      wrapper.appendChild(incIndent);
+
+      // Insert before the lock-icon span (first child of ig-admin)
+      const lockIcon = admin.querySelector('.lock-icon');
+      if (lockIcon) {
+        admin.insertBefore(wrapper, lockIcon);
+      } else {
+        admin.insertBefore(wrapper, admin.firstChild);
+      }
+    }
+  }
+
+  // Run immediately
+  addIndentButtons();
+
+  // Run again after a short delay to catch any late-loading content
+  setTimeout(addIndentButtons, 500);
+  setTimeout(addIndentButtons, 1500);
+
+  // Watch for Canvas AJAX updates (simple approach)
+  let checkInterval = setInterval(() => {
+    const items = document.querySelectorAll('ul.ig-list > li.context_module_item');
+    const processed = document.querySelectorAll('.quick-indent-controls').length;
+
+    if (items.length > processed) {
+      addIndentButtons();
+    }
+
+    // Stop checking after 30 seconds
+    if (Date.now() - startTime > 30000) {
+      clearInterval(checkInterval);
+    }
+  }, 1000);
+
+  const startTime = Date.now();
+
+  // Re-run when user interacts with modules (expand/collapse)
+  document.addEventListener('click', function(e) {
+    if (e.target.closest('.expand_module_link, .collapse_module_link')) {
+      setTimeout(addIndentButtons, 300);
+    }
+  });
+
+})();
