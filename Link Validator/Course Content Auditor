@@ -1,0 +1,517 @@
+// ==UserScript==
+// @name         Canvas | Link Validator | Course Content Auditor
+// @namespace    http://tampermonkey.net/
+// @version      2.1
+// @description  Audit current course for content quality issues (duplicates, missing items, date problems, calendar events outside course dates, empty assignment groups, weighted grading issues)
+// @author       Alex & Claude
+// @match        https://*.instructure.com/courses/*/link_validator
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const CANVAS_URL = window.location.origin;
+    const COURSE_ID = window.location.pathname.match(/\/courses\/(\d+)/)?.[1];
+    let isRunning = false, modalCreated = false;
+
+    function createButton() {
+        const container = document.querySelector('.right-of-crumbs.right-of-crumbs-no-reverse');
+        if (!container || document.getElementById('course-auditor-button')) return;
+
+        const button = document.createElement('a');
+        button.id = 'course-auditor-button';
+        button.className = 'btn';
+        button.style.cssText = 'margin-left:10px;border:2px solid rgb(3,116,181);transition:background-color 0.2s;cursor:pointer;';
+        button.textContent = '⚡ Audit Course Content';
+        button.onclick = openModal;
+
+        container.appendChild(button);
+    }
+
+    function createModal() {
+        if (document.getElementById('course-auditor-modal')) { modalCreated = true; return; }
+
+        const modal = document.createElement('div');
+        modal.id = 'course-auditor-modal';
+        modal.style.cssText = 'display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:10001;justify-content:center;align-items:center;';
+        modal.innerHTML = `
+            <div style="background:white;border-radius:12px;padding:35px;max-width:1100px;max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2);width:90%;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+                    <h2 style="margin:0;color:#2D3B45;font-size:26px;">⚡ Course Content Auditor</h2>
+                    <button id="ca-close-modal" style="background:none;border:none;font-size:28px;cursor:pointer;color:#666;padding:0;line-height:1;">&times;</button>
+                </div>
+
+                <div style="margin-bottom:25px;padding:18px;background:#F5F5F5;border-radius:8px;border-left:4px solid #008EE2;">
+                    <p style="margin:0;color:#2D3B45;font-size:15px;line-height:1.6;">
+                        <strong>What this checks:</strong> Duplicate content (modules, assignments, discussions, quizzes, pages), empty assignment groups, due dates outside course dates (assignments, quizzes, calendar events), and weighted grading issues.
+                    </p>
+                </div>
+
+                <button id="ca-run-button" style="width:100%;padding:14px;background:#0374B5;color:white;border:none;border-radius:6px;font-size:17px;font-weight:600;cursor:pointer;margin-bottom:20px;transition:background-color 0.2s;">Run Audit</button>
+
+                <div id="ca-progress-container" style="margin-bottom:20px;display:none;">
+                    <div style="background:#E8EBED;border-radius:10px;height:24px;overflow:hidden;">
+                        <div id="ca-progress-bar" style="background:#008EE2;height:100%;width:0%;transition:width 0.3s;"></div>
+                    </div>
+                    <p id="ca-progress-text" style="text-align:center;margin-top:10px;color:#666;font-size:15px;">Analyzing course content...</p>
+                </div>
+
+                <div id="ca-results-content"></div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        document.getElementById('ca-close-modal').onclick = closeModal;
+        document.getElementById('ca-run-button').onclick = runAudit;
+        document.addEventListener('keydown', e => { if (e.key === 'Escape' && modal.style.display === 'flex') closeModal(); });
+        modalCreated = true;
+    }
+
+    function openModal() {
+        if (!modalCreated) createModal();
+        const modal = document.getElementById('course-auditor-modal');
+        if (!modal) { alert('Error: Could not create modal.'); return; }
+        modal.style.display = 'flex';
+        document.getElementById('ca-results-content').innerHTML = '';
+        document.getElementById('ca-progress-container').style.display = 'none';
+        document.getElementById('ca-run-button').style.display = 'block';
+    }
+
+    function closeModal() {
+        const modal = document.getElementById('course-auditor-modal');
+        if (modal) {
+            modal.style.display = 'none';
+            document.getElementById('ca-results-content').innerHTML = '';
+        }
+    }
+
+    async function runAudit() {
+        if (isRunning) return;
+        isRunning = true;
+
+        document.getElementById('ca-run-button').style.display = 'none';
+        document.getElementById('ca-progress-container').style.display = 'block';
+        document.getElementById('ca-progress-bar').style.width = '0%';
+
+        try {
+            await analyzeContent();
+        } catch (error) {
+            console.error('Audit error:', error);
+            document.getElementById('ca-results-content').innerHTML = `
+                <div style="padding:20px;background:#FFEBEE;border-radius:8px;border-left:4px solid #F44336;text-align:center;">
+                    <h3 style="margin:0 0 10px 0;color:#C62828;font-size:18px;">❌ Error</h3>
+                    <p style="margin:0;color:#666;font-size:14px;">An error occurred while analyzing the course. Check the console for details.</p>
+                </div>
+            `;
+        }
+
+        isRunning = false;
+    }
+
+    async function fetchAllPages(url) {
+        let allData = [];
+        let nextUrl = url;
+
+        try {
+            while (nextUrl) {
+                const response = await fetch(nextUrl, { headers: { 'Accept': 'application/json' } });
+
+                if (!response.ok) {
+                    console.error(`Failed to fetch: ${nextUrl}`, response.status);
+                    break;
+                }
+
+                const data = await response.json();
+                allData = allData.concat(data);
+
+                // Check for Link header with pagination
+                const linkHeader = response.headers.get('Link');
+                nextUrl = null;
+
+                if (linkHeader) {
+                    const links = linkHeader.split(',');
+                    const nextLink = links.find(link => link.includes('rel="next"'));
+                    if (nextLink) {
+                        const match = nextLink.match(/<([^>]+)>/);
+                        if (match) nextUrl = match[1];
+                    }
+                }
+            }
+        } catch (error) {
+            console.error(`Error fetching data from ${url}:`, error);
+        }
+
+        return allData;
+    }
+
+    function findDuplicates(items, key) {
+        const nameCount = {};
+        items.forEach(item => { if (item[key]) nameCount[item[key]] = (nameCount[item[key]] || 0) + 1; });
+        return Object.entries(nameCount).filter(([, count]) => count > 1).map(([name, count]) => ({ name, count }));
+    }
+
+    function checkDateIssues(items, courseStartDate, courseEndDate, nameKey = 'name', dateKey = 'due_at') {
+        const issues = [], courseStart = courseStartDate ? new Date(courseStartDate) : null, courseEnd = courseEndDate ? new Date(courseEndDate) : null;
+        items.forEach(item => {
+            const itemDate = item[dateKey];
+            if (itemDate) {
+                const checkDate = new Date(itemDate);
+                const itemName = item[nameKey] || item.title;
+                if (courseStart && checkDate < courseStart) {
+                    issues.push({ name: itemName, issue: 'Date before course starts', date: itemDate });
+                } else if (courseEnd && checkDate > courseEnd) {
+                    issues.push({ name: itemName, issue: 'Date after course ends', date: itemDate });
+                }
+            }
+        });
+        return issues;
+    }
+
+    function checkWeightedGradingIssues(assignmentGroups, courseDetails) {
+        if (!courseDetails || !courseDetails.apply_assignment_group_weights) {
+            return null;
+        }
+
+        const totalWeight = assignmentGroups.reduce((sum, g) => sum + (g.group_weight || 0), 0);
+
+        if (totalWeight === 100) {
+            return null;
+        }
+
+        const weightedGroups = assignmentGroups
+            .filter(g => g.group_weight != null && g.group_weight > 0)
+            .map(g => ({ name: g.name, weight: g.group_weight }));
+
+        if (weightedGroups.length === 0) {
+            return null;
+        }
+
+        return {
+            totalWeight: totalWeight,
+            groups: weightedGroups,
+            isUnder100: totalWeight < 100
+        };
+    }
+
+    async function analyzeContent() {
+        const steps = [
+            'Fetching course details',
+            'Loading modules',
+            'Loading assignments',
+            'Loading discussions',
+            'Loading quizzes',
+            'Loading pages',
+            'Loading calendar events',
+            'Analyzing content'
+        ];
+        let currentStep = 0;
+
+        function updateProgress(stepText) {
+            currentStep++;
+            const percent = Math.round((currentStep / steps.length) * 100);
+            document.getElementById('ca-progress-bar').style.width = percent + '%';
+            document.getElementById('ca-progress-text').textContent = stepText || steps[currentStep - 1] || 'Complete';
+        }
+
+        updateProgress('Fetching course details');
+        const courseDetails = await fetchAllPages(`${CANVAS_URL}/api/v1/courses/${COURSE_ID}?include[]=term`);
+        const course = Array.isArray(courseDetails) ? courseDetails[0] : courseDetails;
+
+        updateProgress('Loading course content (modules, assignments, discussions, quizzes, pages, events)');
+
+        // Fetch everything in parallel for better performance
+        const [modules, assignments, discussions, quizzes, pages, calendarEvents, assignmentGroups] = await Promise.all([
+            fetchAllPages(`${CANVAS_URL}/api/v1/courses/${COURSE_ID}/modules?per_page=100`),
+            fetchAllPages(`${CANVAS_URL}/api/v1/courses/${COURSE_ID}/assignments?per_page=100`),
+            fetchAllPages(`${CANVAS_URL}/api/v1/courses/${COURSE_ID}/discussion_topics?per_page=100`),
+            fetchAllPages(`${CANVAS_URL}/api/v1/courses/${COURSE_ID}/quizzes?per_page=100`),
+            fetchAllPages(`${CANVAS_URL}/api/v1/courses/${COURSE_ID}/pages?per_page=100`),
+            fetchAllPages(`${CANVAS_URL}/api/v1/calendar_events?context_codes[]=course_${COURSE_ID}&all_events=true&per_page=100`),
+            fetchAllPages(`${CANVAS_URL}/api/v1/courses/${COURSE_ID}/assignment_groups?include[]=assignments&per_page=100`)
+        ]);
+
+        updateProgress('Analyzing content');
+
+        const weightedGradingIssue = checkWeightedGradingIssues(assignmentGroups, course);
+
+        const issues = {
+            duplicateModules: findDuplicates(modules, 'name'),
+            duplicateAssignments: findDuplicates(assignments, 'name'),
+            duplicateDiscussions: findDuplicates(discussions, 'title'),
+            duplicateQuizzes: findDuplicates(quizzes, 'title'),
+            duplicatePages: findDuplicates(pages, 'title'),
+            emptyAssignmentGroups: assignmentGroups.filter(g => !g.assignments || g.assignments.length === 0),
+            dateIssuesAssignments: checkDateIssues(assignments, course?.start_at, course?.end_at),
+            dateIssuesQuizzes: checkDateIssues(quizzes, course?.start_at, course?.end_at),
+            dateIssuesCalendarEvents: checkDateIssues(calendarEvents, course?.start_at, course?.end_at, 'title', 'start_at'),
+            weightedGradingIssue: weightedGradingIssue,
+            courseStartDate: course?.start_at,
+            courseEndDate: course?.end_at,
+            dataLoadErrors: {
+                modules: modules.length === 0 && document.querySelector('.context_module'),
+                assignments: assignments.length === 0,
+                discussions: discussions.length === 0,
+                quizzes: quizzes.length === 0,
+                pages: pages.length === 0
+            }
+        };
+
+        displayResults(issues, course);
+    }
+
+    function displayResults(issues, courseDetails) {
+        document.getElementById('ca-progress-container').style.display = 'none';
+
+        const totalIssues =
+            issues.duplicateModules.length +
+            issues.duplicateAssignments.length +
+            issues.duplicateDiscussions.length +
+            issues.duplicateQuizzes.length +
+            issues.duplicatePages.length +
+            issues.emptyAssignmentGroups.length +
+            issues.dateIssuesAssignments.length +
+            issues.dateIssuesQuizzes.length +
+            issues.dateIssuesCalendarEvents.length +
+            (issues.weightedGradingIssue ? 1 : 0);
+
+        let html = '';
+
+        // Build issue type cards
+        if (totalIssues > 0) {
+            html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:25px;">';
+
+            const hasDuplicates = issues.duplicateModules.length + issues.duplicateAssignments.length + issues.duplicateDiscussions.length + issues.duplicateQuizzes.length + issues.duplicatePages.length;
+            if (hasDuplicates > 0) {
+                html += `
+                    <div style="padding:16px;background:#F3E5F5;border-radius:8px;border-left:4px solid #9C27B0;">
+                        <div style="font-size:26px;font-weight:bold;color:#7B1FA2;margin-bottom:4px;">${hasDuplicates}</div>
+                        <div style="font-size:14px;color:#666;">📋 Duplicate Items</div>
+                    </div>
+                `;
+            }
+
+            const hasDateIssues = issues.dateIssuesAssignments.length + issues.dateIssuesQuizzes.length + issues.dateIssuesCalendarEvents.length;
+            if (hasDateIssues > 0) {
+                html += `
+                    <div style="padding:16px;background:#FFEBEE;border-radius:8px;border-left:4px solid #F44336;">
+                        <div style="font-size:26px;font-weight:bold;color:#D32F2F;margin-bottom:4px;">${hasDateIssues}</div>
+                        <div style="font-size:14px;color:#666;">📅 Date Issues</div>
+                    </div>
+                `;
+            }
+
+            if (issues.emptyAssignmentGroups.length > 0) {
+                html += `
+                    <div style="padding:16px;background:#FFF3E0;border-radius:8px;border-left:4px solid #FF9800;">
+                        <div style="font-size:26px;font-weight:bold;color:#F57C00;margin-bottom:4px;">${issues.emptyAssignmentGroups.length}</div>
+                        <div style="font-size:14px;color:#666;">📂 Empty Groups</div>
+                    </div>
+                `;
+            }
+
+            if (issues.weightedGradingIssue) {
+                html += `
+                    <div style="padding:16px;background:#FFF3E0;border-radius:8px;border-left:4px solid #FF9800;">
+                        <div style="font-size:26px;font-weight:bold;color:#F57C00;margin-bottom:4px;">1</div>
+                        <div style="font-size:14px;color:#666;">⚖️ Grading Weight Issue</div>
+                    </div>
+                `;
+            }
+
+            html += '</div>';
+        } else {
+            // No issues - show success message
+            html += `
+                <div style="padding:25px;background:#E8F5E9;border-radius:8px;border-left:4px solid #4CAF50;margin-bottom:25px;text-align:center;">
+                    <h3 style="margin:0 0 10px 0;color:#2E7D32;font-size:22px;">✅ Course Looks Good!</h3>
+                    <p style="margin:0;color:#666;font-size:15px;">No content quality issues detected.</p>
+                </div>
+            `;
+        }
+
+        if (totalIssues > 0) {
+            html += '<div style="display:grid;gap:15px;">';
+
+            // Duplicate Content
+            const hasDuplicates = issues.duplicateModules.length + issues.duplicateAssignments.length + issues.duplicateDiscussions.length + issues.duplicateQuizzes.length + issues.duplicatePages.length > 0;
+            if (hasDuplicates) {
+                html += '<div style="padding:18px;background:white;border-radius:8px;border-left:4px solid #9C27B0;border:1px solid #ddd;">';
+                html += '<h4 style="margin:0 0 14px 0;color:#7B1FA2;font-size:18px;">📋 Duplicate Content</h4>';
+                html += '<div style="display:grid;gap:10px;">';
+
+                if (issues.duplicateModules.length > 0) {
+                    html += `<div style="padding:10px;background:#F5F5F5;border-radius:4px;">`;
+                    html += `<div style="font-weight:600;color:#7B1FA2;font-size:15px;margin-bottom:6px;">Modules</div>`;
+                    issues.duplicateModules.forEach(d => {
+                        html += `<div style="font-size:14px;color:#666;padding-left:10px;">• "${d.name}" appears ${d.count} times</div>`;
+                    });
+                    html += `<a href="${CANVAS_URL}/courses/${COURSE_ID}/modules" target="_blank" style="margin-top:8px;display:inline-block;color:#0374B5;text-decoration:underline;font-size:13px;">View Modules</a>`;
+                    html += `</div>`;
+                }
+
+                if (issues.duplicateAssignments.length > 0) {
+                    html += `<div style="padding:10px;background:#F5F5F5;border-radius:4px;">`;
+                    html += `<div style="font-weight:600;color:#7B1FA2;font-size:15px;margin-bottom:6px;">Assignments</div>`;
+                    issues.duplicateAssignments.forEach(d => {
+                        html += `<div style="font-size:14px;color:#666;padding-left:10px;">• "${d.name}" appears ${d.count} times</div>`;
+                    });
+                    html += `<a href="${CANVAS_URL}/courses/${COURSE_ID}/assignments" target="_blank" style="margin-top:8px;display:inline-block;color:#0374B5;text-decoration:underline;font-size:13px;">View Assignments</a>`;
+                    html += `</div>`;
+                }
+
+                if (issues.duplicateDiscussions.length > 0) {
+                    html += `<div style="padding:10px;background:#F5F5F5;border-radius:4px;">`;
+                    html += `<div style="font-weight:600;color:#7B1FA2;font-size:15px;margin-bottom:6px;">Discussions</div>`;
+                    issues.duplicateDiscussions.forEach(d => {
+                        html += `<div style="font-size:14px;color:#666;padding-left:10px;">• "${d.name}" appears ${d.count} times</div>`;
+                    });
+                    html += `<a href="${CANVAS_URL}/courses/${COURSE_ID}/discussion_topics" target="_blank" style="margin-top:8px;display:inline-block;color:#0374B5;text-decoration:underline;font-size:13px;">View Discussions</a>`;
+                    html += `</div>`;
+                }
+
+                if (issues.duplicateQuizzes.length > 0) {
+                    html += `<div style="padding:10px;background:#F5F5F5;border-radius:4px;">`;
+                    html += `<div style="font-weight:600;color:#7B1FA2;font-size:15px;margin-bottom:6px;">Quizzes</div>`;
+                    issues.duplicateQuizzes.forEach(d => {
+                        html += `<div style="font-size:14px;color:#666;padding-left:10px;">• "${d.name}" appears ${d.count} times</div>`;
+                    });
+                    html += `<a href="${CANVAS_URL}/courses/${COURSE_ID}/quizzes" target="_blank" style="margin-top:8px;display:inline-block;color:#0374B5;text-decoration:underline;font-size:13px;">View Quizzes</a>`;
+                    html += `</div>`;
+                }
+
+                if (issues.duplicatePages.length > 0) {
+                    html += `<div style="padding:10px;background:#F5F5F5;border-radius:4px;">`;
+                    html += `<div style="font-weight:600;color:#7B1FA2;font-size:15px;margin-bottom:6px;">Pages</div>`;
+                    issues.duplicatePages.forEach(d => {
+                        html += `<div style="font-size:14px;color:#666;padding-left:10px;">• "${d.name}" appears ${d.count} times</div>`;
+                    });
+                    html += `<a href="${CANVAS_URL}/courses/${COURSE_ID}/pages" target="_blank" style="margin-top:8px;display:inline-block;color:#0374B5;text-decoration:underline;font-size:13px;">View Pages</a>`;
+                    html += `</div>`;
+                }
+
+                html += '</div></div>';
+            }
+
+            // Date Issues
+            const hasDateIssues = issues.dateIssuesAssignments.length + issues.dateIssuesQuizzes.length + issues.dateIssuesCalendarEvents.length > 0;
+            if (hasDateIssues) {
+                html += '<div style="padding:18px;background:white;border-radius:8px;border-left:4px solid #F44336;border:1px solid #ddd;">';
+                html += '<h4 style="margin:0 0 14px 0;color:#D32F2F;font-size:18px;">📅 Date Issues</h4>';
+                if (issues.courseStartDate && issues.courseEndDate) {
+                    html += `<div style="font-size:13px;color:#999;margin-bottom:12px;">Course runs: ${new Date(issues.courseStartDate).toLocaleDateString()} to ${new Date(issues.courseEndDate).toLocaleDateString()}</div>`;
+                }
+                html += '<div style="display:grid;gap:10px;">';
+
+                if (issues.dateIssuesAssignments.length > 0) {
+                    html += `<div style="padding:10px;background:#F5F5F5;border-radius:4px;">`;
+                    html += `<div style="font-weight:600;color:#D32F2F;font-size:15px;margin-bottom:6px;">Assignments</div>`;
+                    issues.dateIssuesAssignments.forEach(d => {
+                        html += `<div style="font-size:14px;color:#666;padding-left:10px;">• "${d.name}" - ${d.issue}</div>`;
+                    });
+                    html += `<a href="${CANVAS_URL}/courses/${COURSE_ID}/assignments" target="_blank" style="margin-top:8px;display:inline-block;color:#0374B5;text-decoration:underline;font-size:13px;">View Assignments</a>`;
+                    html += `</div>`;
+                }
+
+                if (issues.dateIssuesQuizzes.length > 0) {
+                    html += `<div style="padding:10px;background:#F5F5F5;border-radius:4px;">`;
+                    html += `<div style="font-weight:600;color:#D32F2F;font-size:15px;margin-bottom:6px;">Quizzes</div>`;
+                    issues.dateIssuesQuizzes.forEach(d => {
+                        html += `<div style="font-size:14px;color:#666;padding-left:10px;">• "${d.name}" - ${d.issue}</div>`;
+                    });
+                    html += `<a href="${CANVAS_URL}/courses/${COURSE_ID}/quizzes" target="_blank" style="margin-top:8px;display:inline-block;color:#0374B5;text-decoration:underline;font-size:13px;">View Quizzes</a>`;
+                    html += `</div>`;
+                }
+
+                if (issues.dateIssuesCalendarEvents.length > 0) {
+                    html += `<div style="padding:10px;background:#F5F5F5;border-radius:4px;">`;
+                    html += `<div style="font-weight:600;color:#D32F2F;font-size:15px;margin-bottom:6px;">Calendar Events</div>`;
+                    issues.dateIssuesCalendarEvents.forEach(d => {
+                        html += `<div style="font-size:14px;color:#666;padding-left:10px;">• "${d.name}" - ${d.issue}</div>`;
+                    });
+                    html += `<a href="${CANVAS_URL}/courses/${COURSE_ID}/calendar" target="_blank" style="margin-top:8px;display:inline-block;color:#0374B5;text-decoration:underline;font-size:13px;">View Calendar</a>`;
+                    html += `</div>`;
+                }
+
+                html += '</div></div>';
+            }
+
+            // Empty Assignment Groups
+            if (issues.emptyAssignmentGroups.length > 0) {
+                html += '<div style="padding:18px;background:white;border-radius:8px;border-left:4px solid #FF9800;border:1px solid #ddd;">';
+                html += '<h4 style="margin:0 0 14px 0;color:#F57C00;font-size:18px;">📂 Empty Assignment Groups</h4>';
+                html += '<div style="display:grid;gap:8px;">';
+                issues.emptyAssignmentGroups.forEach(g => {
+                    html += `<div style="padding:8px 12px;background:#F5F5F5;border-radius:4px;font-size:14px;color:#666;">• "${g.name}"</div>`;
+                });
+                html += `</div>`;
+                html += `<a href="${CANVAS_URL}/courses/${COURSE_ID}/assignments" target="_blank" style="margin-top:12px;display:inline-block;color:#0374B5;text-decoration:underline;font-size:13px;">View Assignment Groups</a>`;
+                html += '</div>';
+            }
+
+            // Weighted Grading Issues
+            if (issues.weightedGradingIssue) {
+                const wgi = issues.weightedGradingIssue;
+                const colorScheme = wgi.isUnder100 ?
+                    { border: '#F44336', text: '#D32F2F', icon: '⚠️' } :
+                    { border: '#FF9800', text: '#F57C00', icon: '⚖️' };
+
+                html += `<div style="padding:18px;background:white;border-radius:8px;border-left:4px solid ${colorScheme.border};border:1px solid #ddd;">`;
+                html += `<h4 style="margin:0 0 14px 0;color:${colorScheme.text};font-size:18px;">${colorScheme.icon} Weighted Grading Issue</h4>`;
+                html += `<div style="font-size:14px;color:#666;margin-bottom:12px;">`;
+                html += `<strong style="color:${colorScheme.text};">Total Weight: ${wgi.totalWeight}%</strong>`;
+                if (!wgi.isUnder100) html += ` (Over 100% may be intentional for extra credit)`;
+                html += `</div>`;
+                html += `<div style="font-size:14px;color:#666;margin-bottom:8px;"><strong>Assignment Groups:</strong></div>`;
+                html += `<div style="display:grid;gap:6px;padding-left:10px;">`;
+                wgi.groups.forEach(g => {
+                    html += `<div style="font-size:14px;color:#666;">• ${g.name}: <strong>${g.weight}%</strong></div>`;
+                });
+                html += `</div>`;
+                html += `<a href="${CANVAS_URL}/courses/${COURSE_ID}/assignments" target="_blank" style="margin-top:12px;display:inline-block;color:#0374B5;text-decoration:underline;font-size:13px;">View Assignments</a>`;
+                html += `</div>`;
+            }
+
+            html += '</div>';
+        }
+
+        document.getElementById('ca-results-content').innerHTML = html;
+    }
+
+    function init() {
+        if (!COURSE_ID) return;
+
+        // Try to create button immediately
+        createButton();
+        createModal();
+
+        // Set up observer for late-loading elements
+        const observer = new MutationObserver(function(mutations) {
+            for (const mutation of mutations) {
+                if (mutation.addedNodes.length > 0) {
+                    if (!document.getElementById('course-auditor-button') &&
+                        document.querySelector('.right-of-crumbs.right-of-crumbs-no-reverse')) {
+                        createButton();
+                        createModal();
+                        observer.disconnect();
+                        break;
+                    }
+                }
+            }
+        });
+
+        observer.observe(document.body, { childList: true, subtree: true });
+
+        // Fallback to window.onload
+        window.addEventListener('load', function() {
+            if (!document.getElementById('course-auditor-button')) {
+                createButton();
+                createModal();
+                observer.disconnect();
+            }
+        });
+    }
+
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+    else init();
+})();
