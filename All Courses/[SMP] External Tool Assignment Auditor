@@ -1,0 +1,676 @@
+// ==UserScript==
+// @name         Canvas | All Courses | [SMP] External Tool Assignment Auditor
+// @version      1.4
+// @description  Audit Canvas courses for external tool assignments across a term
+// @author       Alex & Claude
+// @match        https://*.instructure.com/courses
+// @grant        none
+// @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // ============================================
+    // CONFIGURATION: Known External Tool Patterns
+    // ============================================
+    // Add URL patterns here to map tool URLs to friendly display names.
+    // Format: 'domain-or-pattern': 'Friendly Display Name'
+    //
+    // The script will check if the tool URL contains any of these patterns
+    // and display the corresponding friendly name instead of the raw URL.
+    //
+    // For tools not listed here, the script will attempt to extract
+    // a readable name from the domain automatically.
+    // ============================================
+    const KNOWN_TOOL_PATTERNS = {
+        '42lines.net': 'Harmonize',
+        'perusall.com': 'Perusall',
+        'pearson.com': 'Pearson MyLab',
+        'interop.pearson.com': 'Pearson MyLab',
+        'playposit.com': 'PlayPosit',
+        'qualtrics.com': 'Qualtrics',
+        'turnitin.com': 'Turnitin',
+        'panopto.com': 'Panopto',
+        'kaltura.com': 'Kaltura',
+        'hypothes.is': 'Hypothesis',
+        'vhl.com': 'Vista Higher Learning',
+        'macmillanlearning.com': 'Macmillan Learning',
+        'cengage.com': 'Cengage',
+        'wiley.com': 'WileyPLUS',
+        'connect.mheducation.com': 'McGraw Hill Connect',
+        'labster.com': 'Labster'
+    };
+    // ============================================
+
+    // Get the Canvas base URL
+    const CANVAS_URL = window.location.origin;
+
+    // State
+    let allCourses = [];
+    let isRunning = false;
+    let termsLoaded = false;
+    let currentResults = null;
+    let activeFilters = new Set();
+
+    // Create modal
+    function createModal() {
+        // Add style for rotating arrow
+        const style = document.createElement('style');
+        style.textContent = `
+            details[open] > summary span:first-of-type {
+                transform: rotate(90deg);
+            }
+        `;
+        document.head.appendChild(style);
+
+        const modal = document.createElement('div');
+        modal.id = 'ext-tool-auditor-modal';
+        modal.style.cssText = `
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 10001;
+            justify-content: center;
+            align-items: center;
+        `;
+
+        modal.innerHTML = `
+            <div style="background: white; border-radius: 12px; padding: 30px; max-width: 900px; max-height: 80vh; overflow-y: auto; box-shadow: 0 8px 32px rgba(0,0,0,0.2); width: 90%;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h2 style="margin: 0; color: #2D3B45; font-size: 24px;">🔧 External Tool Assignment Auditor</h2>
+                    <button id="close-modal" style="background: none; border: none; font-size: 24px; cursor: pointer; color: #666; padding: 0; line-height: 1; transition: color 0.2s;" onmouseover="this.style.color='#333'" onmouseout="this.style.color='#666'">&times;</button>
+                </div>
+
+                <div style="margin-bottom: 25px; padding: 15px; background: #F5F5F5; border-radius: 8px; border-left: 4px solid #8E44AD;">
+                    <p style="margin: 0 0 10px 0; color: #2D3B45; font-size: 14px; line-height: 1.6;">
+                        <strong>External Tool Audit:</strong> This audit finds all assignments configured with external tools (like Perusall, PlayPosit, Qualtrics, etc.) in the selected term.
+                        Results show which courses use which tools and provide direct links to each assignment.
+                    </p>
+                    <p style="margin: 0 0 10px 0; color: #666; font-size: 13px; line-height: 1.6;">
+                        <strong>Note:</strong> This script only detects external tools configured in Assignments. It will not find tools like Honorlock or LockDown Browser that are configured on Quizzes, or tools that don't use the Assignment integration method.
+                    </p>
+                    <p style="margin: 0; color: #666; font-size: 13px; line-height: 1.6;">
+                        <strong>Tip:</strong> The script attempts to automatically clean up external tool names, but this may not always be accurate. If you see wonky tool names, you can edit the KNOWN_TOOL_PATTERNS configuration at the top of the script to add custom display names for specific tool URLs.
+                    </p>
+                </div>
+
+                <div style="margin-bottom: 20px;">
+                    <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #2D3B45;">Select Term:</label>
+                    <select id="ext-term-select" style="width: 100%; padding: 10px; border: 1px solid #C7CDD1; border-radius: 6px; font-size: 14px;">
+                        <option value="">Loading terms...</option>
+                    </select>
+                </div>
+
+                <button id="ext-run-audit" style="width: 100%; padding: 12px; background: #8E44AD; color: white; border: none; border-radius: 6px; font-size: 16px; font-weight: 600; cursor: pointer; margin-bottom: 20px; transition: all 0.2s ease;">
+                    Run Audit
+                </button>
+
+                <div id="ext-audit-results" style="display: none;">
+                    <div id="ext-progress-container" style="margin-bottom: 20px;">
+                        <div style="background: #E8EBED; border-radius: 10px; height: 20px; overflow: hidden;">
+                            <div id="ext-progress-bar" style="background: #8E44AD; height: 100%; width: 0%; transition: width 0.3s;"></div>
+                        </div>
+                        <p id="ext-progress-text" style="text-align: center; margin-top: 8px; color: #666; font-size: 14px;">Checking courses...</p>
+                    </div>
+
+                    <div id="ext-results-content"></div>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        document.getElementById('close-modal').onclick = closeModal;
+        document.getElementById('ext-run-audit').onclick = runAudit;
+
+        const runAuditBtn = document.getElementById('ext-run-audit');
+        runAuditBtn.addEventListener('mouseenter', function() {
+            if (!this.disabled) {
+                this.style.background = '#6C3483';
+                this.style.transform = 'translateY(-2px)';
+                this.style.boxShadow = '0 4px 12px rgba(142,68,173,0.4)';
+            }
+        });
+        runAuditBtn.addEventListener('mouseleave', function() {
+            if (!this.disabled) {
+                this.style.background = '#8E44AD';
+                this.style.transform = 'translateY(0)';
+                this.style.boxShadow = 'none';
+            }
+        });
+
+        // Close on Escape key only (not clicking outside)
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                const modalElement = document.getElementById('ext-tool-auditor-modal');
+                if (modalElement && modalElement.style.display === 'flex') {
+                    closeModal();
+                }
+            }
+        });
+    }
+
+    function openModal() {
+        const modal = document.getElementById('ext-tool-auditor-modal');
+        modal.style.display = 'flex';
+        if (!termsLoaded) loadTerms();
+    }
+
+    function closeModal() {
+        const modal = document.getElementById('ext-tool-auditor-modal');
+        modal.style.display = 'none';
+        document.getElementById('ext-audit-results').style.display = 'none';
+        document.getElementById('ext-results-content').innerHTML = '';
+    }
+
+    async function loadTerms() {
+        const termSelect = document.getElementById('ext-term-select');
+        const runButton = document.getElementById('ext-run-audit');
+
+        termSelect.innerHTML = '<option value="">Loading terms...</option>';
+        runButton.disabled = true;
+        runButton.style.background = '#ccc';
+        runButton.textContent = 'Loading...';
+
+        try {
+            allCourses = await fetchAllCourses();
+            const terms = {};
+            allCourses.forEach(course => {
+                if (course.enrollment_term_id && course.term && course.term.name) {
+                    terms[course.enrollment_term_id] = course.term.name;
+                }
+            });
+
+            const sortedTerms = Object.entries(terms).sort((a, b) => b[0] - a[0]);
+            termSelect.innerHTML = '<option value="">-- Select a Term --</option>' +
+                sortedTerms.map(([id, name]) => `<option value="${id}">${name}</option>`).join('');
+
+            termsLoaded = true;
+            runButton.disabled = false;
+            runButton.style.background = '#8E44AD';
+            runButton.textContent = 'Run Audit';
+        } catch (error) {
+            console.error('Error loading terms:', error);
+            termSelect.innerHTML = '<option value="">Error loading terms</option>';
+            runButton.textContent = 'Run Audit';
+            alert('Error loading terms. Please refresh and try again.');
+        }
+    }
+
+    async function fetchAllCourses() {
+        let courses = [], page = 1, hasMore = true;
+        while (hasMore) {
+            const response = await fetch(`${CANVAS_URL}/api/v1/courses?per_page=100&page=${page}&include[]=term`, {
+                headers: { 'Accept': 'application/json' }
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            courses = courses.concat(data);
+            const linkHeader = response.headers.get('Link');
+            hasMore = linkHeader && linkHeader.includes('rel="next"');
+            page++;
+        }
+        return courses;
+    }
+
+    async function runAudit() {
+        if (isRunning || !termsLoaded) return;
+        const termId = document.getElementById('ext-term-select').value;
+        if (!termId) { alert('Please select a term'); return; }
+
+        // Reset filters for new audit
+        activeFilters.clear();
+
+        isRunning = true;
+        document.getElementById('ext-run-audit').disabled = true;
+        document.getElementById('ext-run-audit').style.background = '#ccc';
+        document.getElementById('ext-audit-results').style.display = 'block';
+        document.getElementById('ext-results-content').innerHTML = '';
+        document.getElementById('ext-progress-container').style.display = 'block';
+        document.getElementById('ext-progress-bar').style.width = '0%';
+        document.getElementById('ext-progress-text').textContent = 'Checking courses...';
+
+        const termCourses = allCourses.filter(c => c.enrollment_term_id == termId);
+        await runExternalToolAudit(termCourses);
+
+        isRunning = false;
+        document.getElementById('ext-run-audit').disabled = false;
+        document.getElementById('ext-run-audit').style.background = '#8E44AD';
+    }
+
+    function getFriendlyToolName(toolData) {
+        if (toolData.title && !toolData.title.startsWith('http')) return toolData.title;
+        const url = toolData.url || toolData.title || '';
+        for (const [domain, friendlyName] of Object.entries(KNOWN_TOOL_PATTERNS)) {
+            if (url.includes(domain)) return friendlyName;
+        }
+        try {
+            const urlObj = new URL(url);
+            const cleanDomain = urlObj.hostname.replace(/^(www\.|app\.|lti\.|api\.)/, '');
+            const domainParts = cleanDomain.split('.');
+            if (domainParts.length >= 2) {
+                const mainDomain = domainParts[0];
+                return mainDomain.charAt(0).toUpperCase() + mainDomain.slice(1);
+            }
+            return cleanDomain;
+        } catch (e) {
+            return 'External Tool';
+        }
+    }
+
+    async function fetchCourseInstructors(courseId) {
+        try {
+            const response = await fetch(`${CANVAS_URL}/api/v1/courses/${courseId}/enrollments?per_page=100&state[]=active`, {
+                headers: { 'Accept': 'application/json' }
+            });
+
+            if (!response.ok) return [];
+
+            const enrollments = await response.json();
+
+            // Define role priorities and labels
+            const roleHierarchy = [
+                { id: '335', label: 'Primary Instructor' },
+                { id: '336', label: 'Secondary Instructor' },
+                { id: '230', label: 'Limited Teacher' },
+                { id: '228', label: 'Teacher (Facilitator)' },
+                { id: '337', label: 'Delegated Access' }
+            ];
+
+            const instructorNames = [];
+
+            // Check each role in priority order
+            for (const role of roleHierarchy) {
+                const enrollment = enrollments.find(e =>
+                    e.role_id === parseInt(role.id) &&
+                    e.user &&
+                    e.user.name &&
+                    e.enrollment_state === 'active'
+                );
+                if (enrollment && enrollment.user && enrollment.user.name) {
+                    instructorNames.push(`${role.label}: ${enrollment.user.name}`);
+                }
+            }
+
+            return instructorNames;
+        } catch (error) {
+            console.error(`Error fetching instructors for course ${courseId}:`, error);
+            return [];
+        }
+    }
+
+    async function runExternalToolAudit(termCourses) {
+        const coursesWithTools = [];
+        let processed = 0;
+        let totalAssignments = 0;
+        const toolCounts = {};
+        const BATCH_SIZE = 5;
+        const BATCH_DELAY = 100;
+
+        // Process courses in batches
+        for (let i = 0; i < termCourses.length; i += BATCH_SIZE) {
+            const batch = termCourses.slice(i, i + BATCH_SIZE);
+
+            await Promise.all(batch.map(async (course) => {
+                try {
+                    const assignments = await fetchCourseAssignments(course.id);
+                    const toolAssignments = assignments.filter(a =>
+                        a.submission_types && a.submission_types.includes('external_tool')
+                    );
+
+                    if (toolAssignments.length > 0) {
+                        const toolGroups = {};
+                        toolAssignments.forEach(assignment => {
+                            const toolData = assignment.external_tool_tag_attributes || {};
+                            const toolName = getFriendlyToolName(toolData);
+                            if (!toolGroups[toolName]) toolGroups[toolName] = [];
+                            toolGroups[toolName].push(assignment);
+
+                            // Track tool counts
+                            if (!toolCounts[toolName]) toolCounts[toolName] = 0;
+                            toolCounts[toolName]++;
+
+                            totalAssignments++;
+                        });
+
+                        // Fetch instructor names
+                        const instructors = await fetchCourseInstructors(course.id);
+
+                        coursesWithTools.push({
+                            course: course,
+                            toolGroups: toolGroups,
+                            totalCount: toolAssignments.length,
+                            instructors: instructors
+                        });
+                    }
+                } catch (error) {
+                    console.error(`Error checking course ${course.id}:`, error);
+                }
+            }));
+
+            processed += batch.length;
+            updateProgress(processed, termCourses.length);
+
+            // Delay between batches
+            if (i + BATCH_SIZE < termCourses.length) {
+                await new Promise(resolve => setTimeout(resolve, BATCH_DELAY));
+            }
+        }
+
+        currentResults = { coursesWithTools, totalCourses: termCourses.length, totalAssignments, toolCounts };
+        displayResults(coursesWithTools, termCourses.length, totalAssignments, toolCounts);
+    }
+
+    async function fetchCourseAssignments(courseId) {
+        let assignments = [];
+        let page = 1;
+        let hasMore = true;
+
+        while (hasMore) {
+            const response = await fetch(`${CANVAS_URL}/api/v1/courses/${courseId}/assignments?per_page=100&page=${page}`, {
+                headers: { 'Accept': 'application/json' }
+            });
+            if (!response.ok) {
+                if (response.status === 401 || response.status === 403) return [];
+                throw new Error(`HTTP ${response.status}`);
+            }
+            const data = await response.json();
+            assignments = assignments.concat(data);
+
+            const linkHeader = response.headers.get('Link');
+            hasMore = linkHeader && linkHeader.includes('rel="next"');
+            page++;
+        }
+        return assignments;
+    }
+
+    function updateProgress(current, total) {
+        const percent = Math.round((current / total) * 100);
+        document.getElementById('ext-progress-bar').style.width = percent + '%';
+        document.getElementById('ext-progress-text').textContent = `Checking courses... ${current} of ${total}`;
+    }
+
+    function exportToExcel() {
+        if (!currentResults) return;
+        const filename = `external_tool_assignments_${new Date().toISOString().split('T')[0]}.xlsx`;
+
+        const wb = XLSX.utils.book_new();
+
+        // Sheet 1: All Data
+        const allData = [];
+        allData.push(['Course Name', 'Course ID', 'Instructor(s)', 'Tool Name', 'Assignment Name', 'Assignment ID', 'Assignment URL']);
+
+        currentResults.coursesWithTools.forEach(item => {
+            const instructorList = item.instructors && item.instructors.length > 0 ? item.instructors.join(', ') : 'N/A';
+            Object.keys(item.toolGroups).forEach(toolName => {
+                item.toolGroups[toolName].forEach(assignment => {
+                    const assignmentUrl = `${CANVAS_URL}/courses/${item.course.id}/assignments/${assignment.id}`;
+                    allData.push([
+                        item.course.name,
+                        item.course.id,
+                        instructorList,
+                        toolName,
+                        assignment.name,
+                        assignment.id,
+                        assignmentUrl
+                    ]);
+                });
+            });
+        });
+
+        const wsAll = XLSX.utils.aoa_to_sheet(allData);
+        XLSX.utils.book_append_sheet(wb, wsAll, 'All Data');
+
+        // Individual sheets per tool
+        const allTools = new Set();
+        currentResults.coursesWithTools.forEach(item => {
+            Object.keys(item.toolGroups).forEach(toolName => allTools.add(toolName));
+        });
+
+        Array.from(allTools).sort().forEach(toolName => {
+            const toolData = [];
+            toolData.push(['Course Name', 'Course ID', 'Instructor(s)', 'Assignment Name', 'Assignment ID', 'Assignment URL']);
+
+            currentResults.coursesWithTools.forEach(item => {
+                const instructorList = item.instructors && item.instructors.length > 0 ? item.instructors.join(', ') : 'N/A';
+                if (item.toolGroups[toolName]) {
+                    item.toolGroups[toolName].forEach(assignment => {
+                        const assignmentUrl = `${CANVAS_URL}/courses/${item.course.id}/assignments/${assignment.id}`;
+                        toolData.push([
+                            item.course.name,
+                            item.course.id,
+                            instructorList,
+                            assignment.name,
+                            assignment.id,
+                            assignmentUrl
+                        ]);
+                    });
+                }
+            });
+
+            // Sanitize sheet name (Excel has 31 char limit and special char restrictions)
+            let sheetName = toolName.replace(/[:\\\/\?\*\[\]]/g, '_').substring(0, 31);
+            const ws = XLSX.utils.aoa_to_sheet(toolData);
+            XLSX.utils.book_append_sheet(wb, ws, sheetName);
+        });
+
+        // Write file
+        XLSX.writeFile(wb, filename);
+    }
+
+    function displayResults(coursesWithTools, totalCourses, totalAssignments, toolCounts) {
+        document.getElementById('ext-progress-container').style.display = 'none';
+
+        const allTools = new Set();
+        coursesWithTools.forEach(item => Object.keys(item.toolGroups).forEach(toolName => allTools.add(toolName)));
+        if (activeFilters.size === 0) allTools.forEach(tool => activeFilters.add(tool));
+        const sortedTools = Array.from(allTools).sort();
+
+        // Create tool breakdown list
+        const sortedToolCounts = Object.entries(toolCounts).sort((a, b) => b[1] - a[1]);
+        const toolBreakdown = sortedToolCounts.map(([tool, count]) =>
+            `<strong>${tool}:</strong> ${count}`
+        ).join(' • ');
+
+        const resultsHTML = `
+            <div style="margin-bottom: 15px; display: flex; gap: 10px;">
+                <button id="export-excel" style="flex: 1; padding: 10px; background: #28A745; color: white; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s ease;">📊 Export to Excel</button>
+                ${sortedTools.length > 0 ? `<button id="toggle-filters" style="flex: 1; padding: 10px; background: #0374B5; color: white; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s ease;">🔍 Filter Tools</button>` : ''}
+            </div>
+            ${sortedTools.length > 0 ? `
+                <div id="filter-panel" style="display: none; margin-bottom: 15px; padding: 15px; background: #F8F9FA; border-radius: 6px; border: 1px solid #DEE2E6;">
+                    <div style="margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+                        <strong style="color: #2D3B45; font-size: 14px;">Show/Hide Tools:</strong>
+                        <div style="display: flex; gap: 8px;">
+                            <button id="select-all-tools" style="padding: 4px 12px; background: #28A745; color: white; border: none; border-radius: 4px; font-size: 12px; cursor: pointer;">Select All</button>
+                            <button id="deselect-all-tools" style="padding: 4px 12px; background: #6C757D; color: white; border: none; border-radius: 4px; font-size: 12px; cursor: pointer;">Deselect All</button>
+                        </div>
+                    </div>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px;">
+                        ${sortedTools.map(tool => `
+                            <label style="display: flex; align-items: center; cursor: pointer; padding: 6px; border-radius: 4px; transition: background 0.2s;" onmouseover="this.style.background='#E9ECEF'" onmouseout="this.style.background='transparent'">
+                                <input type="checkbox" class="tool-filter-checkbox" data-tool="${tool}" ${activeFilters.has(tool) ? 'checked' : ''} style="margin-right: 8px; cursor: pointer;">
+                                <span style="font-size: 13px; color: #495057;">${tool}</span>
+                            </label>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : ''}
+            <div style="margin-bottom: 20px; padding: 15px; background: #EBF5FB; border-radius: 6px; border-left: 4px solid #3498DB;">
+                <h3 style="margin: 0 0 10px 0; color: #2471A3; font-size: 16px;">📈 Summary</h3>
+                <p style="margin: 0 0 8px 0; color: #2D3B45; font-size: 14px;">
+                    Found <strong>${coursesWithTools.length}</strong> course${coursesWithTools.length !== 1 ? 's' : ''} using external tools out of ${totalCourses} total courses in this term.<br>
+                    Total external tool assignments: <strong>${totalAssignments}</strong>
+                </p>
+                ${sortedToolCounts.length > 0 ? `
+                    <p style="margin: 8px 0 0 0; color: #2D3B45; font-size: 13px; line-height: 1.6;">
+                        ${toolBreakdown}
+                    </p>
+                ` : ''}
+            </div>
+            <div id="filtered-results">${renderFilteredResults(coursesWithTools)}</div>
+        `;
+
+        document.getElementById('ext-results-content').innerHTML = resultsHTML;
+
+        const exportBtn = document.getElementById('export-excel');
+        if (exportBtn) {
+            exportBtn.addEventListener('click', exportToExcel);
+            exportBtn.addEventListener('mouseenter', function() {
+                this.style.background = '#218838'; this.style.transform = 'translateY(-2px)'; this.style.boxShadow = '0 4px 12px rgba(40,167,69,0.3)';
+            });
+            exportBtn.addEventListener('mouseleave', function() {
+                this.style.background = '#28A745'; this.style.transform = 'translateY(0)'; this.style.boxShadow = 'none';
+            });
+        }
+
+        const toggleFiltersBtn = document.getElementById('toggle-filters');
+        if (toggleFiltersBtn) {
+            toggleFiltersBtn.addEventListener('click', function() {
+                const filterPanel = document.getElementById('filter-panel');
+                filterPanel.style.display = filterPanel.style.display === 'none' ? 'block' : 'none';
+                this.textContent = filterPanel.style.display === 'block' ? '✓ Filter Tools' : '🔍 Filter Tools';
+            });
+            toggleFiltersBtn.addEventListener('mouseenter', function() {
+                this.style.background = '#025a8f'; this.style.transform = 'translateY(-2px)'; this.style.boxShadow = '0 4px 12px rgba(3,116,181,0.3)';
+            });
+            toggleFiltersBtn.addEventListener('mouseleave', function() {
+                this.style.background = '#0374B5'; this.style.transform = 'translateY(0)'; this.style.boxShadow = 'none';
+            });
+        }
+
+        document.querySelectorAll('.tool-filter-checkbox').forEach(checkbox => {
+            checkbox.addEventListener('change', function() {
+                const toolName = this.getAttribute('data-tool');
+                this.checked ? activeFilters.add(toolName) : activeFilters.delete(toolName);
+                updateFilteredDisplay(coursesWithTools);
+            });
+        });
+
+        const selectAllBtn = document.getElementById('select-all-tools');
+        if (selectAllBtn) {
+            selectAllBtn.addEventListener('click', function() {
+                document.querySelectorAll('.tool-filter-checkbox').forEach(cb => {
+                    cb.checked = true;
+                    activeFilters.add(cb.getAttribute('data-tool'));
+                });
+                updateFilteredDisplay(coursesWithTools);
+            });
+        }
+
+        const deselectAllBtn = document.getElementById('deselect-all-tools');
+        if (deselectAllBtn) {
+            deselectAllBtn.addEventListener('click', function() {
+                document.querySelectorAll('.tool-filter-checkbox').forEach(cb => {
+                    cb.checked = false;
+                    activeFilters.delete(cb.getAttribute('data-tool'));
+                });
+                updateFilteredDisplay(coursesWithTools);
+            });
+        }
+    }
+
+    function renderFilteredResults(coursesWithTools) {
+        const filteredCourses = coursesWithTools.map(item => {
+            const filteredToolGroups = {};
+            let totalCount = 0;
+            Object.keys(item.toolGroups).forEach(toolName => {
+                if (activeFilters.has(toolName)) {
+                    filteredToolGroups[toolName] = item.toolGroups[toolName];
+                    totalCount += item.toolGroups[toolName].length;
+                }
+            });
+            return { ...item, toolGroups: filteredToolGroups, totalCount };
+        }).filter(item => item.totalCount > 0);
+
+        if (filteredCourses.length === 0) {
+            return '<div style="padding: 40px; text-align: center; color: #666;"><p>No assignments match the selected filters.</p></div>';
+        }
+
+        return `<div style="max-height: 500px; overflow-y: auto;">${filteredCourses.map(item => `
+            <details open style="margin-bottom: 15px; padding: 15px; background: white; border-radius: 6px; border: 1px solid #ddd;">
+                <summary style="display: flex; align-items: center; cursor: pointer; user-select: none; list-style: none;">
+                    <span style="margin-right: 8px; color: #666; font-size: 14px; transition: transform 0.2s;">▶</span>
+                    <div style="flex: 1;">
+                        <h4 style="margin: 0; color: #2D3B45; font-size: 15px; font-weight: 600;">
+                            ${item.course.name}
+                            <a href="${CANVAS_URL}/courses/${item.course.id}" target="_blank" style="color: #0374B5; text-decoration: none; font-size: 12px; font-weight: 400; margin-left: 8px; transition: color 0.2s;" onclick="event.stopPropagation()" onmouseover="this.style.color='#025a8f'; this.style.textDecoration='underline'" onmouseout="this.style.color='#0374B5'; this.style.textDecoration='none'">[Course Homepage]</a>
+                            <span style="color: #666; font-size: 13px; font-weight: 400;"> - ${item.totalCount} assignment${item.totalCount !== 1 ? 's' : ''}</span>
+                        </h4>
+                        ${item.instructors && item.instructors.length > 0 ? `<div style="font-size: 11px; color: #666; margin-top: 4px;">${item.instructors.join(', ')}</div>` : ''}
+                    </div>
+                </summary>
+                <div style="margin-top: 12px;">
+                    ${Object.keys(item.toolGroups).map(toolName => `
+                        <details style="margin-bottom: 8px; padding-left: 15px; border-left: 3px solid #8E44AD;">
+                            <summary style="display: flex; align-items: center; cursor: pointer; user-select: none; list-style: none; padding: 4px 0;">
+                                <span style="margin-right: 6px; color: #8E44AD; font-size: 12px; transition: transform 0.2s;">▶</span>
+                                <div style="font-weight: 600; color: #8E44AD; font-size: 14px;">🔧 ${toolName} (${item.toolGroups[toolName].length})</div>
+                            </summary>
+                            <div style="margin-top: 6px;">
+                                ${item.toolGroups[toolName].map(assignment => `
+                                    <div style="margin-left: 20px; margin-bottom: 4px;">
+                                        <a href="${CANVAS_URL}/courses/${item.course.id}/assignments/${assignment.id}" target="_blank" style="color: #0374B5; text-decoration: none; font-size: 13px; transition: color 0.2s;" onmouseover="this.style.color='#025a8f'; this.style.textDecoration='underline'" onmouseout="this.style.color='#0374B5'; this.style.textDecoration='none'">${assignment.name}${assignment.published ? '' : ' <span style="color: #999;">(unpublished)</span>'}</a>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </details>
+                    `).join('')}
+                </div>
+            </details>
+        `).join('')}</div>`;
+    }
+
+    function updateFilteredDisplay(coursesWithTools) {
+        const container = document.getElementById('filtered-results');
+        if (container) container.innerHTML = renderFilteredResults(coursesWithTools);
+    }
+
+    function init() {
+        console.log('External Tool Assignment Auditor initializing...');
+
+        // Wait for master panel to be ready with polling
+        const checkPanel = setInterval(() => {
+            if (window.canvasScriptPanel) {
+                clearInterval(checkPanel);
+                console.log('Master panel found, registering script...');
+
+                window.canvasScriptPanel.register({
+                    id: 'external-tool-auditor',
+                    name: 'External Tool Assignments',
+                    icon: '🔧',
+                    description: 'Find all assignments configured with external tools (Perusall, PlayPosit, etc.) across courses in a term. Shows which tools are used and provides direct links to each assignment.',
+                    category: 'Audits',
+                    buttonText: 'Open Auditor',
+                    action: openModal,
+                    closeAfterAction: false
+                });
+                console.log('Script registered with master panel');
+            }
+        }, 100);
+
+        // Stop checking after 10 seconds if panel never loads
+        setTimeout(() => {
+            clearInterval(checkPanel);
+            if (!window.canvasScriptPanel) {
+                console.warn('Master panel not found after 10 seconds');
+            }
+        }, 10000);
+
+        // Create the modal regardless of panel status
+        createModal();
+        console.log('Initialization complete');
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+})();
