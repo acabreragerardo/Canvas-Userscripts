@@ -1,0 +1,809 @@
+// ==UserScript==
+// @name         Canvas | All Courses | [SMP] Content Migration Auditor
+// @version      1.4
+// @description  Audit Canvas courses for content migration history by term
+// @author       Alex & Claude
+// @match        https://*.instructure.com/courses
+// @grant        none
+// @run-at       document-idle
+// @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const CANVAS_URL = window.location.origin;
+
+    let allCourses = [];
+    let isRunning = false;
+    let termsLoaded = false;
+    let currentResults = null;
+    let modalCreated = false;
+
+    function createModal() {
+        console.log('Creating Content Migration Auditor modal...');
+
+        if (document.getElementById('migration-auditor-modal')) {
+            console.log('Modal already exists');
+            modalCreated = true;
+            return;
+        }
+
+        const modal = document.createElement('div');
+        modal.id = 'migration-auditor-modal';
+        modal.style.cssText = `
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 10001;
+            justify-content: center;
+            align-items: center;
+        `;
+
+        // Add style for rotating arrow
+        const style = document.createElement('style');
+        style.textContent = `
+            details[open] > summary span:first-of-type {
+                transform: rotate(90deg);
+            }
+        `;
+        document.head.appendChild(style);
+
+        modal.innerHTML = `
+            <div style="background: white; border-radius: 12px; padding: 30px; max-width: 1000px; max-height: 85vh; overflow-y: auto; box-shadow: 0 8px 32px rgba(0,0,0,0.2); width: 90%;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h2 style="margin: 0; color: #2D3B45; font-size: 24px;">📦 Content Migration Auditor</h2>
+                    <button id="mig-close-modal" style="background: none; border: none; font-size: 24px; cursor: pointer; color: #666; padding: 0; line-height: 1; transition: color 0.2s;" onmouseover="this.style.color='#333'" onmouseout="this.style.color='#666'">&times;</button>
+                </div>
+
+                <div style="margin-bottom: 25px; padding: 15px; background: #F5F5F5; border-radius: 8px; border-left: 4px solid #008EE2;">
+                    <p style="margin: 0; color: #2D3B45; font-size: 14px; line-height: 1.6;">
+                        <strong>What this does:</strong> Analyzes all courses in a term to show their content migration history.
+                        Helps identify courses where instructors did their own imports and courses that may still be empty.
+                    </p>
+                </div>
+
+                <div style="margin-bottom: 20px;">
+                    <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #2D3B45;">Select Term:</label>
+                    <select id="mig-term-select" style="width: 100%; padding: 10px; border: 1px solid #C7CDD1; border-radius: 6px; font-size: 14px;">
+                        <option value="">Loading terms...</option>
+                    </select>
+                </div>
+
+                <button id="mig-run-audit" style="width: 100%; padding: 12px; background: #0d2340; color: white; border: none; border-radius: 6px; font-size: 16px; font-weight: 600; cursor: pointer; margin-bottom: 20px; transition: all 0.2s ease;">
+                    Run Migration Audit
+                </button>
+
+                <div id="mig-audit-results" style="display: none;">
+                    <div id="mig-progress-container" style="margin-bottom: 20px;">
+                        <div style="background: #E8EBED; border-radius: 10px; height: 20px; overflow: hidden;">
+                            <div id="mig-progress-bar" style="background: #008EE2; height: 100%; width: 0%; transition: width 0.3s;"></div>
+                        </div>
+                        <p id="mig-progress-text" style="text-align: center; margin-top: 8px; color: #666; font-size: 14px;">Analyzing courses...</p>
+                    </div>
+
+                    <div id="mig-results-content"></div>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        document.getElementById('mig-close-modal').onclick = closeModal;
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                const modalElement = document.getElementById('migration-auditor-modal');
+                if (modalElement && modalElement.style.display === 'flex') {
+                    closeModal();
+                }
+            }
+        });
+
+        document.getElementById('mig-run-audit').onclick = runAudit;
+
+        const runBtn = document.getElementById('mig-run-audit');
+        runBtn.addEventListener('mouseenter', function() {
+            if (!this.disabled) {
+                this.style.background = '#1a3a5c';
+                this.style.transform = 'translateY(-2px)';
+                this.style.boxShadow = '0 4px 12px rgba(13,35,64,0.4)';
+            }
+        });
+        runBtn.addEventListener('mouseleave', function() {
+            if (!this.disabled) {
+                this.style.background = '#0d2340';
+                this.style.transform = 'translateY(0)';
+                this.style.boxShadow = 'none';
+            }
+        });
+
+        modalCreated = true;
+        console.log('Modal creation complete');
+    }
+
+    function openModal() {
+        console.log('openModal called for Migration Auditor');
+
+        if (!modalCreated) createModal();
+
+        const modal = document.getElementById('migration-auditor-modal');
+        if (!modal) {
+            console.error('ERROR: Modal element not found even after createModal()!');
+            alert('Error: Could not create modal. Please refresh the page and try again.');
+            return;
+        }
+
+        modal.style.display = 'flex';
+
+        if (!termsLoaded) loadTerms();
+    }
+
+    function closeModal() {
+        const modal = document.getElementById('migration-auditor-modal');
+        if (modal) {
+            modal.style.display = 'none';
+            document.getElementById('mig-audit-results').style.display = 'none';
+            document.getElementById('mig-results-content').innerHTML = '';
+        }
+    }
+
+    async function loadTerms() {
+        const termSelect = document.getElementById('mig-term-select');
+        const runButton = document.getElementById('mig-run-audit');
+
+        termSelect.innerHTML = '<option value="">Loading terms...</option>';
+        runButton.disabled = true;
+        runButton.style.background = '#ccc';
+        runButton.textContent = 'Loading...';
+
+        try {
+            allCourses = await fetchAllCourses();
+
+            const terms = {};
+            allCourses.forEach(course => {
+                if (course.enrollment_term_id && course.term && course.term.name) {
+                    terms[course.enrollment_term_id] = course.term.name;
+                }
+            });
+
+            const sortedTerms = Object.entries(terms).sort((a, b) => b[0] - a[0]);
+            termSelect.innerHTML = '<option value="">-- Select a Term --</option>' +
+                sortedTerms.map(([id, name]) => `<option value="${id}">${name}</option>`).join('');
+
+            termsLoaded = true;
+            runButton.disabled = false;
+            runButton.style.background = '#0d2340';
+            runButton.textContent = 'Run Migration Audit';
+
+        } catch (error) {
+            console.error('Error loading terms:', error);
+            termSelect.innerHTML = '<option value="">Error loading terms</option>';
+            runButton.textContent = 'Run Migration Audit';
+            alert('Error loading terms. Please refresh and try again.');
+        }
+    }
+
+    async function fetchAllCourses() {
+        let courses = [];
+        let page = 1;
+        let hasMore = true;
+
+        while (hasMore) {
+            const response = await fetch(`${CANVAS_URL}/api/v1/courses?per_page=100&page=${page}&include[]=term`, {
+                headers: { 'Accept': 'application/json' }
+            });
+
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+            const data = await response.json();
+            courses = courses.concat(data);
+
+            const linkHeader = response.headers.get('Link');
+            hasMore = linkHeader && linkHeader.includes('rel="next"');
+            page++;
+        }
+
+        return courses;
+    }
+
+    async function runAudit() {
+        if (isRunning || !termsLoaded) return;
+
+        const termId = document.getElementById('mig-term-select').value;
+
+        if (!termId) {
+            alert('Please select a term');
+            return;
+        }
+
+        isRunning = true;
+        document.getElementById('mig-run-audit').disabled = true;
+        document.getElementById('mig-run-audit').style.background = '#ccc';
+        document.getElementById('mig-audit-results').style.display = 'block';
+        document.getElementById('mig-results-content').innerHTML = '';
+
+        document.getElementById('mig-progress-container').style.display = 'block';
+        document.getElementById('mig-progress-bar').style.width = '0%';
+        document.getElementById('mig-progress-text').textContent = 'Analyzing courses...';
+
+        const termCourses = allCourses.filter(c => c.enrollment_term_id == termId);
+
+        await analyzeMigrations(termCourses);
+
+        isRunning = false;
+        document.getElementById('mig-run-audit').disabled = false;
+        document.getElementById('mig-run-audit').style.background = '#0d2340';
+    }
+
+    async function fetchCourseMigrations(courseId, csrfToken) {
+        try {
+            const response = await fetch(`${CANVAS_URL}/api/v1/courses/${courseId}/content_migrations?per_page=50`, {
+                headers: {
+                    'Accept': 'application/json',
+                    'X-CSRF-Token': csrfToken || ''
+                }
+            });
+
+            if (!response.ok) return null;
+            return await response.json();
+        } catch (error) {
+            console.error(`Error fetching migrations for course ${courseId}:`, error);
+            return null;
+        }
+    }
+
+    function isTeacherRole(role = '', type = '') {
+        const r = String(role || '');
+        const t = String(type || '');
+        return (t === 'TeacherEnrollment') || /teacher|instructor/i.test(r);
+    }
+
+    function pickPrimaryInstructors(enrollments = []) {
+        const teachers = enrollments
+            .filter(e => {
+                const state = e.enrollment_state || e.workflow_state || '';
+                const activeOk = !state || state === 'active';
+                const role = e.role || '';
+                const type = e.type || e.enrollment_type || '';
+                return activeOk && isTeacherRole(role, type) && e.user && e.user.id;
+            })
+            .map(e => ({
+                id: e.user.id,
+                name: e.user.name || 'Unknown',
+                role: e.role || e.type || 'Teacher',
+            }));
+
+        if (teachers.length === 0) {
+            return {
+                names: 'N/A',
+                roles: 'N/A',
+                ids: 'N/A'
+            };
+        }
+
+        const primary = teachers.filter(t => /primary/i.test(t.role));
+        const chosen = primary.length ? primary : teachers;
+
+        const uniq = (arr) => Array.from(new Set(arr));
+
+        return {
+            names: uniq(chosen.map(t => t.name)).join('; '),
+            roles: uniq(chosen.map(t => t.role)).join('; '),
+            ids: uniq(chosen.map(t => String(t.id))).join('; ')
+        };
+    }
+
+    async function fetchCourseEnrollments(courseId, csrfToken) {
+        try {
+            const response = await fetch(`${CANVAS_URL}/api/v1/courses/${courseId}/enrollments?per_page=100`, {
+                headers: {
+                    'Accept': 'application/json',
+                    'X-CSRF-Token': csrfToken || ''
+                }
+            });
+
+            if (!response.ok) return { userMap: {}, primary: { names: 'N/A', roles: 'N/A', ids: 'N/A' } };
+
+            const enrollments = await response.json();
+            const userMap = {};
+            enrollments.forEach(enrollment => {
+                if (enrollment.user && enrollment.user.id) {
+                    userMap[enrollment.user.id] = {
+                        name: enrollment.user.name,
+                        role: enrollment.role,
+                        type: enrollment.type || enrollment.enrollment_type
+                    };
+                }
+            });
+
+            const primary = pickPrimaryInstructors(enrollments);
+
+            return { userMap, primary };
+
+        } catch (error) {
+            return { userMap: {}, primary: { names: 'N/A', roles: 'N/A', ids: 'N/A' } };
+        }
+    }
+
+    async function analyzeMigrations(termCourses) {
+        const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content;
+        const results = [];
+        let processed = 0;
+        const BATCH_SIZE = 5;
+
+        for (let i = 0; i < termCourses.length; i += BATCH_SIZE) {
+            const batch = termCourses.slice(i, i + BATCH_SIZE);
+
+            await Promise.all(batch.map(async (course) => {
+                try {
+                    const migrations = await fetchCourseMigrations(course.id, csrfToken);
+                    const enrollmentData = await fetchCourseEnrollments(course.id, csrfToken);
+                    const enrollments = enrollmentData.userMap || {};
+                    const primary = enrollmentData.primary || { names: 'N/A', roles: 'N/A', ids: 'N/A' };
+
+                    const courseData = {
+                        id: course.id,
+                        name: course.name,
+                        course_code: course.course_code,
+                        migrationCount: migrations ? migrations.length : 0,
+                        primary_instructor_names: primary.names,
+                        primary_instructor_roles: primary.roles,
+                        primary_instructor_ids: primary.ids,
+                        migrations: []
+                    };
+
+                    if (migrations && migrations.length > 0) {
+                        for (const migration of migrations) {
+                            const userInfo = enrollments[migration.user_id] || { name: 'Unknown User', role: null, type: null };
+
+                            let migrationType = migration.migration_type || 'Unknown';
+                            if (migrationType === 'course_copy_importer') migrationType = 'Course Copy';
+                            else if (migrationType === 'canvas_cartridge_importer') migrationType = 'Canvas Export';
+                            else if (migrationType === 'common_cartridge_importer') migrationType = 'Common Cartridge';
+                            else if (migrationType === 'zip_file_importer') migrationType = 'ZIP File';
+                            else if (migrationType === 'qti_converter') migrationType = 'QTI Quiz';
+
+                            courseData.migrations.push({
+                                id: migration.id,
+                                type: migrationType,
+                                user_id: migration.user_id,
+                                user_name: userInfo.name,
+                                user_role: userInfo.role,
+                                status: migration.workflow_state,
+                                created_at: migration.created_at,
+                                finished_at: migration.finished_at
+                            });
+                        }
+                        courseData.migrations.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+                    }
+
+                    results.push(courseData);
+                } catch (error) {
+                    console.error(`Error processing course ${course.id}:`, error);
+                }
+            }));
+
+            processed += batch.length;
+            updateProgress(processed, termCourses.length);
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        currentResults = results;
+        displayResults(results);
+    }
+
+    function updateProgress(current, total) {
+        const percent = Math.round((current / total) * 100);
+        document.getElementById('mig-progress-bar').style.width = percent + '%';
+        document.getElementById('mig-progress-text').textContent = `Analyzing courses... ${current} of ${total}`;
+    }
+
+    function downloadBlob(blob, filename) {
+        const link = document.createElement('a');
+        const url = URL.createObjectURL(blob);
+        link.setAttribute('href', url);
+        link.setAttribute('download', filename);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }
+
+    function escapeCSV(value) {
+        const s = (value === null || value === undefined) ? '' : String(value);
+        return `"${s.replace(/"/g, '""')}"`;
+    }
+
+    function rowsToCSV(headers, rows) {
+        let csv = headers.map(escapeCSV).join(',') + '\n';
+        rows.forEach(r => {
+            csv += headers.map(h => escapeCSV(r[h])).join(',') + '\n';
+        });
+        return csv;
+    }
+
+    function buildExportBuckets(results) {
+        const withMigrations = results.filter(c => c.migrationCount > 0);
+        const withoutMigrations = results.filter(c => c.migrationCount === 0);
+
+        const instructorMigrations = [];
+        withMigrations.forEach(course => {
+            const allInstructorMigs = course.migrations.filter(m =>
+                m.user_role && (m.user_role.includes('Teacher') || m.user_role.includes('Instructor'))
+            );
+            if (allInstructorMigs.length > 0) {
+                instructorMigrations.push({
+                    ...course,
+                    instructorMigs: allInstructorMigs
+                });
+            }
+        });
+
+        return { withMigrations, withoutMigrations, instructorMigrations };
+    }
+
+    function exportAudit() {
+        const results = currentResults || window.currentMigrationResults?.all;
+        if (!results) return;
+
+        const { withMigrations, withoutMigrations, instructorMigrations } = buildExportBuckets(results);
+
+        const sheet1 = [];
+        instructorMigrations.forEach(course => {
+            course.instructorMigs.forEach(mig => {
+                sheet1.push({
+                    'Course Name': course.name,
+                    'Course Code': course.course_code || '',
+                    'Course ID': course.id,
+                    'Primary Instructor(s)': course.primary_instructor_names || 'N/A',
+                    'Primary Instructor Role(s)': course.primary_instructor_roles || 'N/A',
+                    'Primary Instructor User ID(s)': course.primary_instructor_ids || 'N/A',
+                    'Migration ID': mig.id,
+                    'Migration Type': mig.type,
+                    'Migration Status': mig.status,
+                    'Performed By': mig.user_name,
+                    'Performer Role': mig.user_role || 'N/A',
+                    'Performer User ID': mig.user_id,
+                    'Created At': mig.created_at ? new Date(mig.created_at).toLocaleString() : '',
+                    'Finished At': mig.finished_at ? new Date(mig.finished_at).toLocaleString() : '',
+                    'Course URL': `${CANVAS_URL}/courses/${course.id}`,
+                    'Migration Details URL': `${CANVAS_URL}/courses/${course.id}/content_migrations`
+                });
+            });
+        });
+
+        const sheet2 = withMigrations.map(course => {
+            const latest = course.migrations[0];
+            return {
+                'Course Name': course.name,
+                'Course Code': course.course_code || '',
+                'Course ID': course.id,
+                'Primary Instructor(s)': course.primary_instructor_names || 'N/A',
+                'Primary Instructor Role(s)': course.primary_instructor_roles || 'N/A',
+                'Primary Instructor User ID(s)': course.primary_instructor_ids || 'N/A',
+                'Migration Count': course.migrationCount,
+                'Most Recent Migration': 'Yes',
+                'Migration Type': latest?.type || 'N/A',
+                'Performed By': latest?.user_name || 'N/A',
+                'User Role': latest?.user_role || 'N/A',
+                'User ID': latest?.user_id || 'N/A',
+                'Date': latest?.created_at ? new Date(latest.created_at).toLocaleDateString() : 'N/A',
+                'Course URL': `${CANVAS_URL}/courses/${course.id}`
+            };
+        });
+
+        const sheet3 = withoutMigrations.map(course => ({
+            'Course Name': course.name,
+            'Course Code': course.course_code || '',
+            'Course ID': course.id,
+            'Primary Instructor(s)': course.primary_instructor_names || 'N/A',
+            'Primary Instructor Role(s)': course.primary_instructor_roles || 'N/A',
+            'Primary Instructor User ID(s)': course.primary_instructor_ids || 'N/A',
+            'Migration Count': 0,
+            'Most Recent Migration': 'No',
+            'Course URL': `${CANVAS_URL}/courses/${course.id}`
+        }));
+
+        const dateStamp = new Date().toISOString().split('T')[0];
+
+        try {
+            if (typeof XLSX !== 'undefined' && XLSX.utils) {
+                const wb = XLSX.utils.book_new();
+
+                const ws1 = XLSX.utils.json_to_sheet(sheet1.length ? sheet1 : [{ 'No instructor-performed migrations found': '' }]);
+                const ws2 = XLSX.utils.json_to_sheet(sheet2.length ? sheet2 : [{ 'No courses with migrations found': '' }]);
+                const ws3 = XLSX.utils.json_to_sheet(sheet3.length ? sheet3 : [{ 'No courses without migrations found': '' }]);
+
+                XLSX.utils.book_append_sheet(wb, ws1, 'Instructor-Performed Migrations');
+                XLSX.utils.book_append_sheet(wb, ws2, 'All Courses with Migrations');
+                XLSX.utils.book_append_sheet(wb, ws3, 'Courses Without Migrations');
+
+                const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+                const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+                downloadBlob(blob, `migration_audit_${dateStamp}.xlsx`);
+                return;
+            }
+        } catch (e) {
+            console.warn('XLSX export failed, falling back to CSVs:', e);
+        }
+
+        const s1Headers = sheet1.length ? Object.keys(sheet1[0]) : ['Info'];
+        const s2Headers = sheet2.length ? Object.keys(sheet2[0]) : ['Info'];
+        const s3Headers = sheet3.length ? Object.keys(sheet3[0]) : ['Info'];
+
+        const csv1 = rowsToCSV(s1Headers, sheet1.length ? sheet1 : [{ Info: 'No instructor-performed migrations found' }]);
+        const csv2 = rowsToCSV(s2Headers, sheet2.length ? sheet2 : [{ Info: 'No courses with migrations found' }]);
+        const csv3 = rowsToCSV(s3Headers, sheet3.length ? sheet3 : [{ Info: 'No courses without migrations found' }]);
+
+        downloadBlob(new Blob([csv1], { type: 'text/csv;charset=utf-8;' }), `migration_audit_${dateStamp}_instructor_migrations.csv`);
+        downloadBlob(new Blob([csv2], { type: 'text/csv;charset=utf-8;' }), `migration_audit_${dateStamp}_courses_with_migrations.csv`);
+        downloadBlob(new Blob([csv3], { type: 'text/csv;charset=utf-8;' }), `migration_audit_${dateStamp}_courses_without_migrations.csv`);
+    }
+
+    function toggleCourseDetails(courseId) {
+        const detailsDiv = document.getElementById(`details-${courseId}`);
+        const toggleBtn = document.getElementById(`toggle-${courseId}`);
+
+        if (detailsDiv && toggleBtn) {
+            if (detailsDiv.style.display === 'none') {
+                detailsDiv.style.display = 'block';
+                toggleBtn.textContent = '▼';
+            } else {
+                detailsDiv.style.display = 'none';
+                toggleBtn.textContent = '▶';
+            }
+        }
+    }
+
+    function displayResults(results) {
+        document.getElementById('mig-progress-container').style.display = 'none';
+
+        // Sort by most recent migration first
+        const withMigrations = results
+            .filter(c => c.migrationCount > 0)
+            .sort((a, b) => new Date(b.migrations[0].created_at) - new Date(a.migrations[0].created_at));
+
+        const withoutMigrations = results.filter(c => c.migrationCount === 0);
+
+        const instructorMigrations = [];
+        withMigrations.forEach(course => {
+            const allInstructorMigs = course.migrations.filter(m =>
+                m.user_role && (m.user_role.includes('Teacher') || m.user_role.includes('Instructor'))
+            );
+            if (allInstructorMigs.length > 0) {
+                instructorMigrations.push({
+                    ...course,
+                    instructorMigs: allInstructorMigs
+                });
+            }
+        });
+
+        const resultsHTML = `
+            <div style="margin-bottom: 15px;">
+                <button id="export-excel" style="width: 100%; padding: 10px; background: #1e7e34; color: white; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s ease;">
+                    📊 Export to Excel
+                </button>
+            </div>
+
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px;">
+                <div style="padding: 15px; background: #E3F2FD; border-radius: 8px; border-left: 4px solid #2196F3;">
+                    <div style="font-size: 28px; font-weight: bold; color: #1976D2;">${results.length}</div>
+                    <div style="font-size: 13px; color: #666;">Total Courses</div>
+                </div>
+                <div style="padding: 15px; background: #E8F5E9; border-radius: 8px; border-left: 4px solid #4CAF50;">
+                    <div style="font-size: 28px; font-weight: bold; color: #2E7D32;">${withMigrations.length}</div>
+                    <div style="font-size: 13px; color: #666;">With Migrations</div>
+                </div>
+                <div style="padding: 15px; background: #FFF3E0; border-radius: 8px; border-left: 4px solid #FF9800;">
+                    <div style="font-size: 28px; font-weight: bold; color: #E65100;">${withoutMigrations.length}</div>
+                    <div style="font-size: 13px; color: #666;">No Migrations</div>
+                </div>
+            </div>
+
+            ${instructorMigrations.length > 0 ? `
+            <div style="margin-bottom: 20px; padding: 15px; background: #FFF9E6; border-radius: 8px; border-left: 4px solid #FFC107;">
+                <h3 style="margin: 0 0 12px 0; color: #F57F17; font-size: 16px;">⚠️ Instructor-Performed Migrations (${instructorMigrations.length})</h3>
+                <p style="margin: 0 0 12px 0; color: #666; font-size: 13px;">These courses had migrations performed by instructors/teachers. Review for potential issues.</p>
+                <details style="cursor: pointer;">
+                    <summary style="display: flex; align-items: center; padding: 8px; font-weight: 600; color: #F57F17; font-size: 13px; user-select: none; list-style: none;">
+                        <span style="margin-right: 8px; transition: transform 0.2s;">▶</span>
+                        View ${instructorMigrations.length} courses
+                    </summary>
+                    <div style="margin-top: 10px; max-height: 350px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; background: white;">
+                        ${instructorMigrations.map(course => {
+                            const latest = course.instructorMigs[0];
+                            const date = new Date(latest.created_at).toLocaleDateString();
+                            return `
+                                <div style="padding: 10px; border-bottom: 1px solid #f0f0f0;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                                        <div style="flex: 1; display: flex; align-items: center; gap: 8px; cursor: pointer;" onclick="toggleCourseDetails('inst-${course.id}')">
+                                            <button id="toggle-inst-${course.id}" style="background: none; border: none; cursor: pointer; font-size: 14px; color: #666; padding: 0; pointer-events: none;">▶</button>
+                                            <div>
+                                                <div style="font-weight: 600; color: #2D3B45; font-size: 14px;">${course.name}</div>
+                                                <div style="font-size: 11px; color: #666; margin-top: 2px;">
+                                                    <span style="display: inline-block; padding: 2px 8px; background: #E3F2FD; border-radius: 3px; margin-right: 8px;">${latest.type}</span>
+                                                    by <strong>${latest.user_name}</strong> on ${date}
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <a href="${CANVAS_URL}/courses/${course.id}/content_migrations" target="_blank"
+                                           style="background: #0d2340; color: white; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-size: 12px; white-space: nowrap; margin-left: 10px;">
+                                            View Details
+                                        </a>
+                                    </div>
+                                    <div id="details-inst-${course.id}" style="display: none; margin-top: 10px; padding: 10px; background: #f9f9f9; border-radius: 4px;">
+                                        ${course.instructorMigs.map(mig => {
+                                            const migDate = new Date(mig.created_at).toLocaleDateString();
+                                            return `
+                                                <div style="font-size: 12px; color: #666; padding: 4px 0; border-bottom: 1px solid #e0e0e0;">
+                                                    <span style="display: inline-block; padding: 2px 8px; background: #E3F2FD; border-radius: 3px; margin-right: 8px;">${mig.type}</span>
+                                                    by <strong>${mig.user_name}</strong> on ${migDate}
+                                                </div>
+                                            `;
+                                        }).join('')}
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                </details>
+            </div>
+            ` : ''}
+
+            <div style="margin-bottom: 20px; padding: 15px; background: #E8F5E9; border-radius: 8px; border-left: 4px solid #4CAF50;">
+                <h3 style="margin: 0 0 12px 0; color: #2E7D32; font-size: 16px;">✅ All Courses with Migrations (${withMigrations.length})</h3>
+                ${withMigrations.length === 0 ?
+                    '<p style="margin: 0; color: #666; font-size: 13px;">No courses found with migrations</p>' :
+                    `<details style="cursor: pointer;">
+                        <summary style="display: flex; align-items: center; padding: 8px; font-weight: 600; color: #2E7D32; font-size: 13px; user-select: none; list-style: none;">
+                            <span style="margin-right: 8px; transition: transform 0.2s;">▶</span>
+                            View ${withMigrations.length} courses
+                        </summary>
+                        <div style="margin-top: 10px; max-height: 400px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; background: white;">
+                            ${withMigrations.map(course => {
+                                const latest = course.migrations[0];
+                                const date = new Date(latest.created_at).toLocaleDateString();
+                                return `
+                                    <div style="padding: 10px; border-bottom: 1px solid #f0f0f0;">
+                                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                                            <div style="flex: 1; display: flex; align-items: center; gap: 8px; cursor: pointer;" onclick="toggleCourseDetails('${course.id}')">
+                                                <button id="toggle-${course.id}" style="background: none; border: none; cursor: pointer; font-size: 14px; color: #666; padding: 0; pointer-events: none;">▶</button>
+                                                <div>
+                                                    <div style="font-weight: 600; color: #2D3B45; font-size: 13px; margin-bottom: 4px;">${course.name}</div>
+                                                    <div style="font-size: 11px; color: #666;">
+                                                        <strong>${course.migrationCount}</strong> migration${course.migrationCount !== 1 ? 's' : ''} •
+                                                        Last: <span style="display: inline-block; padding: 2px 6px; background: #E3F2FD; border-radius: 3px;">${latest.type}</span>
+                                                        by ${latest.user_name} on ${date}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <a href="${CANVAS_URL}/courses/${course.id}/content_migrations" target="_blank"
+                                               style="background: #0d2340; color: white; padding: 4px 10px; border-radius: 3px; text-decoration: none; font-size: 11px; margin-left: 10px;">
+                                                View Details
+                                            </a>
+                                        </div>
+                                        <div id="details-${course.id}" style="display: none; margin-top: 10px; padding: 10px; background: #f9f9f9; border-radius: 4px;">
+                                            ${course.migrations.map(mig => {
+                                                const migDate = new Date(mig.created_at).toLocaleDateString();
+                                                return `
+                                                    <div style="font-size: 12px; color: #666; padding: 4px 0; border-bottom: 1px solid #e0e0e0;">
+                                                        <span style="display: inline-block; padding: 2px 8px; background: #E3F2FD; border-radius: 3px; margin-right: 8px;">${mig.type}</span>
+                                                        by <strong>${mig.user_name}</strong> on ${migDate}
+                                                    </div>
+                                                `;
+                                            }).join('')}
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </details>`
+                }
+            </div>
+
+            <div style="padding: 15px; background: #FFEBEE; border-radius: 8px; border-left: 4px solid #F44336;">
+                <h3 style="margin: 0 0 12px 0; color: #C62828; font-size: 16px;">🔭 Courses Without Migrations (${withoutMigrations.length})</h3>
+                ${withoutMigrations.length === 0 ?
+                    '<p style="margin: 0; color: #666; font-size: 13px;">All courses have at least one migration!</p>' :
+                    `<p style="margin: 0 0 12px 0; color: #666; font-size: 13px;">These courses may be empty or have manually created content.</p>
+                    <details style="cursor: pointer;">
+                        <summary style="display: flex; align-items: center; padding: 8px; font-weight: 600; color: #C62828; font-size: 13px; user-select: none; list-style: none;">
+                            <span style="margin-right: 8px; transition: transform 0.2s;">▶</span>
+                            View ${withoutMigrations.length} courses
+                        </summary>
+                        <div style="margin-top: 10px; max-height: 300px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; background: white;">
+                            ${withoutMigrations.map(course => `
+                                <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border-bottom: 1px solid #f0f0f0;">
+                                    <span style="color: #2D3B45; font-size: 13px;">${course.name}</span>
+                                    <a href="${CANVAS_URL}/courses/${course.id}" target="_blank"
+                                       style="background: #0d2340; color: white; padding: 4px 10px; border-radius: 3px; text-decoration: none; font-size: 11px;">
+                                        View Course
+                                    </a>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </details>`
+                }
+            </div>
+        `;
+
+        document.getElementById('mig-results-content').innerHTML = resultsHTML;
+
+        window.currentMigrationResults = {
+            all: results,
+            withMigrations: withMigrations,
+            withoutMigrations: withoutMigrations,
+            instructorMigrations: instructorMigrations
+        };
+
+        window.toggleCourseDetails = toggleCourseDetails;
+
+        const exportBtn = document.getElementById('export-excel');
+        if (exportBtn) {
+            exportBtn.addEventListener('click', exportAudit);
+            exportBtn.addEventListener('mouseenter', function() {
+                this.style.background = '#155d27';
+                this.style.transform = 'translateY(-2px)';
+                this.style.boxShadow = '0 4px 12px rgba(30,126,52,0.3)';
+            });
+            exportBtn.addEventListener('mouseleave', function() {
+                this.style.background = '#1e7e34';
+                this.style.transform = 'translateY(0)';
+                this.style.boxShadow = 'none';
+            });
+        }
+    }
+
+    function waitForMasterPanel(callback, maxAttempts = 20, interval = 500) {
+        let attempts = 0;
+
+        const checkPanel = setInterval(() => {
+            attempts++;
+
+            if (window.canvasScriptPanel) {
+                clearInterval(checkPanel);
+                console.log(`Migration Auditor: Master panel found after ${attempts} attempt(s)`);
+                callback();
+            } else if (attempts >= maxAttempts) {
+                clearInterval(checkPanel);
+                console.warn('Migration Auditor: Master panel not found after maximum attempts. Script may not register properly.');
+                createModal();
+            }
+        }, interval);
+    }
+
+    function init() {
+        console.log('Content Migration Auditor initializing...');
+
+        waitForMasterPanel(() => {
+            console.log('Master panel found, registering Migration Auditor...');
+            window.canvasScriptPanel.register({
+                id: 'migration-auditor',
+                name: 'Content Migration Auditor',
+                icon: '📦',
+                description: 'Analyze content migration history across all courses in a term. Identify instructor-performed imports and potentially empty courses.',
+                category: 'Audits',
+                buttonText: 'Open Auditor',
+                action: openModal,
+                closeAfterAction: false
+            });
+            console.log('Migration Auditor registered with master panel');
+
+            createModal();
+            console.log('Migration Auditor initialization complete');
+        });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+})();
