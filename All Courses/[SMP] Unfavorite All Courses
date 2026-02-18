@@ -1,0 +1,129 @@
+// ==UserScript==
+// @name         Canvas | All Courses | [SMP] Unfavorite All Courses
+// @namespace    http://tampermonkey.net/
+// @version      2.2
+// @description  Unfavorite all courses - works with Canvas Scripts Master Panel
+// @author       Alex C. & Claude (who did all the work)
+// @match        https://*.instructure.com/courses
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    let isRunning = false;
+
+    function unfavoriteCourse(courseRow) {
+        const favoriteSpan = courseRow.querySelector('.course-list-favorite-course[data-favorite-url]');
+        if (favoriteSpan && favoriteSpan.title?.includes('remove')) {
+            favoriteSpan.click();
+            return true;
+        }
+        return false;
+    }
+
+    // Function to unfavorite all courses
+    function unfavoriteAllCourses() {
+        if (isRunning) return;
+        isRunning = true;
+
+        const panelButton = document.querySelector('.script-action-btn[data-script-id="unfavorite-all"]');
+
+        // Update button to show progress
+        if (panelButton) {
+            panelButton.disabled = true;
+            panelButton.style.background = '#ccc';
+            panelButton.style.cursor = 'not-allowed';
+            panelButton.innerHTML = 'Starting...';
+        }
+
+        // Find all course table rows
+        const courseRows = document.querySelectorAll('.course-list-table-row');
+        let unfavoritedCount = 0;
+        let totalProcessed = 0;
+
+        if (courseRows.length === 0) {
+            isRunning = false;
+            if (panelButton) {
+                panelButton.disabled = false;
+                panelButton.style.background = '#112d54';
+                panelButton.style.cursor = 'pointer';
+                panelButton.innerHTML = 'No courses found';
+
+                // Reset after 2 seconds
+                setTimeout(() => {
+                    panelButton.innerHTML = 'Unfavorite All';
+                }, 2000);
+            }
+            return;
+        }
+
+        courseRows.forEach((courseRow, index) => {
+            // Stagger the requests to avoid overwhelming the server
+            setTimeout(() => {
+                if (unfavoriteCourse(courseRow)) {
+                    unfavoritedCount++;
+                }
+                totalProcessed++;
+
+                // Update button with progress
+                if (panelButton) {
+                    panelButton.innerHTML = `Unfavoriting... ${totalProcessed}/${courseRows.length}`;
+                }
+
+                // Re-enable button when done
+                if (totalProcessed === courseRows.length) {
+                    setTimeout(() => {
+                        isRunning = false;
+                        if (panelButton) {
+                            panelButton.disabled = false;
+                            panelButton.style.background = '#0b874b';
+                            panelButton.style.cursor = 'pointer';
+                            panelButton.innerHTML = `✓ Unfavorited ${unfavoritedCount}!`;
+
+                            // Reset button after 3 seconds
+                            setTimeout(() => {
+                                if (panelButton) {
+                                    panelButton.style.background = '#112d54';
+                                    panelButton.innerHTML = 'Unfavorite All';
+                                }
+                            }, 3000);
+                        }
+                    }, 500);
+                }
+            }, index * 50); // 50ms delay between each request
+        });
+    }
+
+    // Initialize the script
+    function init() {
+        // Wait for master panel to be ready
+        const checkPanel = setInterval(() => {
+            if (window.canvasScriptPanel) {
+                clearInterval(checkPanel);
+
+                // Register with the master panel
+                window.canvasScriptPanel.register({
+                    id: 'unfavorite-all',
+                    name: 'Unfavorite All Courses',
+                    icon: '⭐',
+                    description: 'Quickly remove all courses from your favorites list. Useful for cleaning up your course dashboard at the start of a new term.',
+                    category: 'Miscellaneous',
+                    buttonText: 'Unfavorite All',
+                    action: unfavoriteAllCourses,
+                    closeAfterAction: false  // Keep panel open to see progress
+                });
+            }
+        }, 100);
+
+        // Stop checking after 5 seconds if panel never loads
+        setTimeout(() => clearInterval(checkPanel), 5000);
+    }
+
+    // Start the script when DOM is ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
