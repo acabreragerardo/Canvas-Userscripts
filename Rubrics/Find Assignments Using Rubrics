@@ -1,0 +1,458 @@
+// ==UserScript==
+// @name         Canvas | Rubrics | Find Assignments Using Rubrics
+// @namespace    http://tampermonkey.net/
+// @version      1.42
+// @description  Inserts assignment usage information directly beneath each rubric in the main list
+// @match        https://*.instructure.com/courses/*/rubrics
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Styles
+    const styles = {
+        container: 'margin: 5px 0 15px 30px; padding: 8px; border-left: 3px solid #0374B5; background-color: #f8f9fa;',
+        header: 'margin-bottom: 5px; font-weight: bold; color: #2d3b45;',
+        assignmentList: 'margin-left: 15px;',
+        link: 'color: #0374B5; text-decoration: none;',
+        badge: 'display: inline-block; padding: 2px 6px; border-radius: 10px; background-color: #0374B5; color: white; font-size: 0.8em; margin-left: 5px;',
+        noAssignments: 'color: #888; font-style: italic;',
+        loadingMessage: 'text-align: center; padding: 20px; color: #888;',
+        errorMessage: 'text-align: center; padding: 20px; color: #c00; background-color: #fee;',
+        noRubricsSection: 'margin-top: 30px; padding: 15px; border: 1px solid #ddd; border-radius: 5px; background-color: #f9f9f9;',
+        button: 'margin-bottom: 10px;',
+        indicator: 'margin-left: 10px; font-weight: bold;',
+        indicatorUnused: 'color: #c00;',
+        indicatorUsed: 'color: #090;'
+    };
+
+    let buttonAddAttempts = 0;
+    const maxButtonAttempts = 20;
+    let buttonAddInterval = null;
+
+    // Create loading indicator
+    function showLoading() {
+        // First remove any existing message
+        hideLoading();
+
+        const loadingDiv = document.createElement('div');
+        loadingDiv.id = 'tm-rubric-loading';
+        loadingDiv.innerHTML = 'Loading assignments and rubrics data...';
+        loadingDiv.style = styles.loadingMessage;
+
+        const container = document.querySelector('#content');
+        if (container) {
+            container.appendChild(loadingDiv);
+        }
+    }
+
+    // Remove loading indicator
+    function hideLoading() {
+        const loadingDiv = document.getElementById('tm-rubric-loading');
+        if (loadingDiv) {
+            loadingDiv.remove();
+        }
+    }
+
+    // Show error message
+    function showError(message) {
+        hideLoading();
+        const errorDiv = document.createElement('div');
+        errorDiv.id = 'tm-rubric-error';
+        errorDiv.innerHTML = `Error: ${message}`;
+        errorDiv.style = styles.errorMessage;
+
+        const container = document.querySelector('#content');
+        if (container) {
+            container.appendChild(errorDiv);
+        }
+    }
+
+    // Function to get data with pagination
+    async function getAllPaginatedData(url) {
+        let allData = [];
+        let nextUrl = url;
+
+        while (nextUrl) {
+            try {
+                const response = await fetch(nextUrl, {
+                    method: 'GET',
+                    credentials: 'include'
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                allData = allData.concat(data);
+
+                // Get the link header for pagination
+                const linkHeader = response.headers.get('Link');
+                if (linkHeader) {
+                    const nextLink = linkHeader.split(',').find(link => link.includes('rel="next"'));
+                    nextUrl = nextLink ? nextLink.split(';')[0].trim().slice(1, -1) : null;
+                } else {
+                    nextUrl = null;
+                }
+            } catch (error) {
+                console.error('Error fetching paginated data:', error);
+                throw error;
+            }
+        }
+
+        return allData;
+    }
+
+    // Get all assignments for the course with pagination
+    function getAllAssignments(courseId) {
+        return getAllPaginatedData(`/api/v1/courses/${courseId}/assignments?per_page=100`);
+    }
+
+    // Get all rubrics for the course with pagination
+    function getAllRubrics(courseId) {
+        return getAllPaginatedData(`/api/v1/courses/${courseId}/rubrics?per_page=100`);
+    }
+
+    // Function to append assignments below each rubric in the main list
+    function insertAssignmentInfo(rubrics, assignments) {
+        // First, remove any previously inserted elements
+        document.querySelectorAll('.tm-rubric-assignment-info').forEach(el => el.remove());
+        document.querySelectorAll('.tm-rubric-indicator').forEach(el => el.remove());
+
+        // Find all rubric elements in the DOM
+        const rubricElements = document.querySelectorAll('#rubrics > ul > li');
+
+        rubricElements.forEach(rubricElement => {
+            // Get the rubric ID from the element
+            const rubricLink = rubricElement.querySelector('a.title');
+            if (!rubricLink) return;
+
+            const rubricIdMatch = rubricLink.getAttribute('href').match(/rubrics\/(\d+)/);
+            if (!rubricIdMatch) return;
+
+            const rubricId = parseInt(rubricIdMatch[1]);
+
+            // Find corresponding rubric data
+            const rubricData = rubrics.find(r => r.id === rubricId);
+            if (!rubricData) return;
+
+            // Get assignments that use this rubric
+            const assignmentsUsingRubric = assignments.filter(assignment => {
+                return assignment.rubric_settings && assignment.rubric_settings.id === rubricId;
+            });
+
+            // Add an indicator to the rubric title
+            const indicator = document.createElement('span');
+            indicator.className = 'tm-rubric-indicator';
+            indicator.style = styles.indicator;
+
+            if (assignmentsUsingRubric.length > 0) {
+                indicator.innerHTML = `<span style="${styles.indicatorUsed}">✓ Used</span>`;
+            } else {
+                indicator.innerHTML = `<span style="${styles.indicatorUnused}">✗ Unused</span>`;
+            }
+
+            rubricLink.insertAdjacentElement('afterend', indicator);
+
+            // Create container for assignments
+            const assignmentContainer = document.createElement('div');
+            assignmentContainer.className = 'tm-rubric-assignment-info';
+            assignmentContainer.style = styles.container;
+
+            const headerDiv = document.createElement('div');
+            headerDiv.style = styles.header;
+            headerDiv.innerHTML = `Assignments using this rubric <span style="${styles.badge}">${assignmentsUsingRubric.length}</span>`;
+            assignmentContainer.appendChild(headerDiv);
+
+            // Create assignment list
+            const listDiv = document.createElement('div');
+            listDiv.style = styles.assignmentList;
+
+            if (assignmentsUsingRubric.length > 0) {
+                assignmentsUsingRubric.forEach(assignment => {
+                    const assignmentLink = document.createElement('div');
+                    assignmentLink.innerHTML = `<a href="${assignment.html_url}" target="_blank" style="${styles.link}">${assignment.name}</a>`;
+                    listDiv.appendChild(assignmentLink);
+                });
+            } else {
+                listDiv.innerHTML = '<span style="' + styles.noAssignments + '">None</span>';
+            }
+
+            assignmentContainer.appendChild(listDiv);
+
+            // Insert the container after the rubric details row
+            rubricElement.appendChild(assignmentContainer);
+        });
+    }
+
+    // Function to create and display a section for assignments without rubrics
+    function displayAssignmentsWithoutRubrics(assignments) {
+        // Remove any existing section
+        const existingSection = document.getElementById('tm-assignments-without-rubrics');
+        if (existingSection) {
+            existingSection.remove();
+        }
+
+        // Filter out quizzes and assignments that have rubrics
+        const assignmentsWithoutRubrics = assignments.filter(assignment => {
+            // Skip quizzes
+            if (assignment.is_quiz_assignment ||
+                (assignment.submission_types && assignment.submission_types.includes('online_quiz'))) {
+                return false;
+            }
+            // Only include assignments without rubrics
+            return !assignment.rubric_settings;
+        });
+
+        // Create a container for assignments without rubrics
+        const container = document.createElement('div');
+        container.id = 'tm-assignments-without-rubrics';
+        container.style = styles.noRubricsSection;
+
+        const title = document.createElement('h3');
+        title.innerHTML = `Assignments Without Rubrics <span style="${styles.badge}">${assignmentsWithoutRubrics.length}</span>`;
+        container.appendChild(title);
+
+        // Create assignment list
+        if (assignmentsWithoutRubrics.length > 0) {
+            const listElement = document.createElement('ul');
+
+            assignmentsWithoutRubrics.forEach(assignment => {
+                const listItem = document.createElement('li');
+                listItem.innerHTML = `<a href="${assignment.html_url}" target="_blank" style="${styles.link}">${assignment.name}</a>`;
+                listElement.appendChild(listItem);
+            });
+
+            container.appendChild(listElement);
+        } else {
+            const message = document.createElement('p');
+            message.style = styles.noAssignments;
+            message.textContent = 'All non-quiz assignments have rubrics. Great job!';
+            container.appendChild(message);
+        }
+
+        // Append to the page
+        const contentDiv = document.querySelector('#content');
+        if (contentDiv) {
+            contentDiv.appendChild(container);
+        }
+    }
+
+    // Utility function to get the course ID from the URL
+    function getCourseIdFromUrl() {
+        const url = window.location.href;
+        const match = url.match(/courses\/(\d+)/);
+        return match ? match[1] : null;
+    }
+
+    // Main function to fetch rubrics and assignments, and display assignments
+    async function fetchAndDisplayAssignments() {
+        showLoading();
+
+        try {
+            const courseId = getCourseIdFromUrl();
+            if (!courseId) {
+                throw new Error('Could not determine course ID from URL');
+            }
+
+            // Fetch both rubrics and assignments in parallel
+            const [rubrics, assignments] = await Promise.all([
+                getAllRubrics(courseId),
+                getAllAssignments(courseId)
+            ]);
+
+            // Insert assignment info directly under each rubric in the main list
+            insertAssignmentInfo(rubrics, assignments);
+
+            // Display assignments without rubrics (excluding quizzes)
+            displayAssignmentsWithoutRubrics(assignments);
+
+            hideLoading();
+        } catch (error) {
+            console.error('Error fetching data:', error);
+            showError(error.message || 'Failed to load rubrics and assignments data');
+        }
+    }
+
+    // Check if button already exists
+    function buttonExists() {
+        return document.getElementById('tm-load-rubric-data') !== null;
+    }
+
+// Add the button to the right sidebar
+function addButton() {
+    // Don't add if it already exists
+    if (buttonExists()) {
+        console.log('Rubric button already exists, skipping...');
+        return true;
+    }
+
+    const rightSide = document.querySelector('#right-side');
+    if (!rightSide) {
+        console.log('Right sidebar not found yet...');
+        return false;
+    }
+
+    console.log('Adding rubric button to sidebar...');
+
+    // Create button with Canvas-like styling but distinctive border
+    const button = document.createElement('a');
+    button.href = '#';
+    button.className = 'btn button-sidebar-wide';
+    button.id = 'tm-load-rubric-data';
+    button.innerHTML = '⚡Find Rubric Usage';
+    button.style = 'margin-bottom: 10px; border: 2px solid #0374B5; transition: background-color 0.2s ease;';
+
+    // Add hover effect with !important to override Canvas styles
+    button.addEventListener('mouseenter', function() {
+        this.style.setProperty('background-color', '#e8e8e8', 'important');
+    });
+
+    button.addEventListener('mouseleave', function() {
+        this.style.setProperty('background-color', '', '');
+    });
+
+    // Add event listener
+    button.addEventListener('click', function(e) {
+        e.preventDefault();
+        fetchAndDisplayAssignments();
+    });
+
+    // Add to sidebar
+    rightSide.appendChild(button);
+    return true;
+}
+
+    // Function to wait for element with timeout
+    function waitForElement(selector, timeout = 10000) {
+        return new Promise((resolve, reject) => {
+            const element = document.querySelector(selector);
+            if (element) {
+                resolve(element);
+                return;
+            }
+
+            const observer = new MutationObserver((mutations, obs) => {
+                const element = document.querySelector(selector);
+                if (element) {
+                    obs.disconnect();
+                    resolve(element);
+                }
+            });
+
+            observer.observe(document.body, {
+                childList: true,
+                subtree: true
+            });
+
+            setTimeout(() => {
+                observer.disconnect();
+                reject(new Error(`Timeout waiting for ${selector}`));
+            }, timeout);
+        });
+    }
+
+    // Improved button addition with multiple strategies
+    async function ensureButtonIsAdded() {
+        console.log('Starting button addition process...');
+
+        // Strategy 1: Try immediately
+        if (addButton()) {
+            console.log('Button added immediately');
+            return;
+        }
+
+        // Strategy 2: Wait for right sidebar to appear
+        try {
+            await waitForElement('#right-side', 5000);
+            if (addButton()) {
+                console.log('Button added after waiting for right-side');
+                return;
+            }
+        } catch (error) {
+            console.log('Right sidebar wait timeout, trying other strategies...');
+        }
+
+        // Strategy 3: Polling approach with exponential backoff
+        buttonAddAttempts = 0;
+        buttonAddInterval = setInterval(() => {
+            buttonAddAttempts++;
+            console.log(`Button add attempt ${buttonAddAttempts}/${maxButtonAttempts}`);
+
+            if (addButton()) {
+                console.log('Button added via polling');
+                clearInterval(buttonAddInterval);
+                return;
+            }
+
+            if (buttonAddAttempts >= maxButtonAttempts) {
+                console.log('Max button add attempts reached');
+                clearInterval(buttonAddInterval);
+            }
+        }, 500); // Check every 500ms
+
+        // Strategy 4: Listen for Canvas page changes
+        const observer = new MutationObserver((mutations) => {
+            if (buttonExists()) return;
+
+            mutations.forEach((mutation) => {
+                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+                    // Check if any added nodes contain or are the right sidebar
+                    for (let node of mutation.addedNodes) {
+                        if (node.nodeType === Node.ELEMENT_NODE) {
+                            if (node.id === 'right-side' || node.querySelector('#right-side')) {
+                                console.log('Right sidebar detected via mutation observer');
+                                setTimeout(() => addButton(), 100);
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+        });
+
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+    }
+
+    // Multiple initialization strategies
+    function initializeScript() {
+        console.log('Initializing Canvas Rubric script...');
+
+        // Strategy 1: DOM ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', ensureButtonIsAdded);
+        } else {
+            // DOM is already ready
+            ensureButtonIsAdded();
+        }
+
+        // Strategy 2: Window load (fallback)
+        window.addEventListener('load', () => {
+            setTimeout(ensureButtonIsAdded, 1000);
+        });
+
+        // Strategy 3: Canvas-specific events (if they exist)
+        document.addEventListener('page:loaded', ensureButtonIsAdded);
+        document.addEventListener('turbo:load', ensureButtonIsAdded);
+
+        // Strategy 4: Hash change (for Canvas SPA navigation)
+        window.addEventListener('hashchange', () => {
+            setTimeout(ensureButtonIsAdded, 500);
+        });
+
+        // Strategy 5: Focus event (when user returns to tab)
+        window.addEventListener('focus', () => {
+            if (!buttonExists()) {
+                setTimeout(ensureButtonIsAdded, 100);
+            }
+        });
+    }
+
+    // Start the script
+    initializeScript();
+})();
