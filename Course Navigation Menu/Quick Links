@@ -1,0 +1,110 @@
+// ==UserScript==
+// @name         Canvas | Course Navigation Menu | Quick Links
+// @namespace    https://github.com/redice44
+// @version      0.2.0
+// @description  Adds quick links to deeply nested items - simplified version
+// @author       Matt Thomson (modified by Alex)
+// @match        https://fiu.instructure.com/courses/*
+// @run-at       document-idle
+// ==/UserScript==
+(function() {
+    'use strict';
+    // ===== SIMPLE CONFIGURATION =====
+    // Just add your links in the order you want them!
+    // Use { separator: true } to add a line separator
+    // Set enabled: false to hide any item
+    const menuItems = [
+        { title: 'Student View', url: '/student_view', method: 'post', enabled: true },
+        { title: 'All Pages', url: '/pages', enabled: true },
+        { title: 'All Rubrics', url: '/rubrics', enabled: true },
+        { title: 'All Question Banks', url: '/question_banks', enabled: true },
+        { separator: true }, // This adds a line separator
+        { title: 'Ally', url: '/external_tools/149770', enabled: true },
+        { title: 'MultiTool', url: '/external_tools/177849', enabled: true },
+        { title: 'Quiz Extensions', url: '/external_tools/90447', enabled: true },
+        { title: 'TidyUp', url: '/external_tools/169055', enabled: true },
+        { separator: true }, // Another line separator
+        { title: 'Link Validator', url: '/link_validator', enabled: true },
+        { title: 'Navigation Settings', url: '/settings#tab-navigation', enabled: true },
+        { title: 'Import Content', url: '/content_migrations', enabled: true },
+        // Add more items here as needed:
+        // { title: 'Your Link Name', url: '/your-url-here', enabled: true },
+        // { separator: true }, // Add separator when you want one
+        // { title: 'Feature Options', url: '/settings#tab-features', enabled: false },
+        // { title: 'App Center', url: '/settings#tab-tools', enabled: false },
+        // { title: 'Outcomes', url: '/outcomes', enabled: false },
+        // { title: 'Student Groups', url: '/groups', enabled: false }
+    ];
+    // Additional options
+    const config = {
+        addTopBottomSeparators: true, // Add lines above and below the entire menu
+        waitForMenuLoad: 500          // Wait time for Canvas menu to load
+    };
+    // ===== END CONFIGURATION =====
+    function buildMenu() {
+        const menuEl = document.querySelector('#section-tabs');
+        if (!menuEl) {
+            console.log('Canvas Quick Links: Navigation menu not found');
+            return;
+        }
+        // Get course info from URL
+        const match = window.location.href.match(/(https:\/\/[^/]+)\/courses\/(\d+)/);
+        if (!match) {
+            console.log('Canvas Quick Links: Not in a course page');
+            return;
+        }
+        const [, baseUrl, courseID] = match;
+        // Add top separator if enabled
+        if (config.addTopBottomSeparators) {
+            menuEl.appendChild(document.createElement('hr'));
+        }
+        let itemsAdded = 0;
+        // Go through each menu item
+        menuItems.forEach(item => {
+            if (item.separator) {
+                // Add a separator line
+                menuEl.appendChild(makeSeparator());
+            } else if (item.enabled) {
+                // Add a menu link
+                const fullUrl = `${baseUrl}/courses/${courseID}${item.url}`;
+                menuEl.appendChild(makeMenuItem(item.title, fullUrl, item.method));
+                itemsAdded++;
+            }
+        });
+        // Add bottom separator if enabled
+        if (config.addTopBottomSeparators) {
+            menuEl.appendChild(document.createElement('hr'));
+        }
+        console.log(`Canvas Quick Links: Added ${itemsAdded} menu items`);
+    }
+    function makeSeparator() {
+        const separatorEl = document.createElement('li');
+        separatorEl.style.cssText = `
+            height: 1px;
+            background-color: #C7CDD1;
+            margin: 6px 50px;
+            border: none;
+            list-style: none;
+        `;
+        return separatorEl;
+    }
+    function makeMenuItem(title, fullUrl, method) {
+        const itemEl = document.createElement('li');
+        itemEl.classList.add('section');
+        const linkEl = document.createElement('a');
+        linkEl.href = fullUrl;
+        linkEl.innerText = title;
+        if (method) linkEl.setAttribute('data-method', method);
+        itemEl.appendChild(linkEl);
+        return itemEl;
+    }
+    // Initialize the script
+    function init() {
+        setTimeout(buildMenu, config.waitForMenuLoad);
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
