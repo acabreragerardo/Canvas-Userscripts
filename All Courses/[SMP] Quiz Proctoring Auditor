@@ -1,0 +1,713 @@
+// ==UserScript==
+// @name         Canvas | All Courses | [SMP] Quiz Proctoring Auditor
+// @version      2.4
+// @description  Audit Canvas courses for LockDown Browser and Honorlock proctored quizzes
+// @author       Alex & Claude
+// @match        https://*.instructure.com/courses
+// @grant        none
+// @run-at       document-idle
+// @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // CONFIGURATION
+    const PROCTORING_TOOLS = {
+        'LockDown Browser': { type: 'lockdown', toolId: '422' },
+        'Honorlock Proctoring': { type: 'honorlock', toolId: '183234' }
+    };
+
+    // Get the Canvas base URL
+    const CANVAS_URL = window.location.origin;
+
+    // State
+    let allCourses = [];
+    let isRunning = false;
+    let termsLoaded = false;
+    let currentResults = null;
+    let modalCreated = false;
+    let currentView = 'course'; // 'course' or 'tool'
+
+    // Create modal
+    function createModal() {
+        console.log('Creating modal...');
+
+        // Check if modal already exists
+        if (document.getElementById('proctoring-tools-auditor-modal')) {
+            console.log('Modal already exists');
+            modalCreated = true;
+            return;
+        }
+
+        const modal = document.createElement('div');
+        modal.id = 'proctoring-tools-auditor-modal';
+        modal.style.cssText = `
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 10001;
+            justify-content: center;
+            align-items: center;
+        `;
+
+        // Add style for rotating arrow
+        const style = document.createElement('style');
+        style.textContent = `
+            details[open] > summary span:first-of-type {
+                transform: rotate(90deg);
+            }
+        `;
+        document.head.appendChild(style);
+
+        modal.innerHTML = `
+            <div id="modal-content" style="background: white; border-radius: 12px; padding: 30px; max-width: 800px; max-height: 80vh; overflow-y: auto; box-shadow: 0 8px 32px rgba(0,0,0,0.2); width: 90%;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h2 style="margin: 0; color: #2D3B45; font-size: 24px;">🔒 Proctoring Auditor</h2>
+                    <button id="proc-close-modal" style="background: none; border: none; font-size: 24px; cursor: pointer; color: #666; padding: 0; line-height: 1; transition: color 0.2s;" onmouseover="this.style.color='#333'" onmouseout="this.style.color='#666'">&times;</button>
+                </div>
+
+                <div id="tool-description" style="margin-bottom: 25px; padding: 15px; background: #FFF3E0; border-radius: 8px; border-left: 4px solid #DC3545;">
+                    <p style="margin: 0; color: #2D3B45; font-size: 14px; line-height: 1.6;">
+                        <strong>Proctoring Audit:</strong> This audit finds all courses with proctored quizzes (LockDown Browser and Honorlock) in the selected term.
+                        After a course copy, proctoring settings must be initialized by clicking on the proctoring tool in each course's navigation menu.
+                        This tool provides a convenient list with direct links to open all courses, allowing you to quickly initialize settings for multiple courses.
+                    </p>
+                </div>
+
+                <div style="margin-bottom: 20px;">
+                    <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #2D3B45;">Select Term:</label>
+                    <select id="proc-term-select" style="width: 100%; padding: 10px; border: 1px solid #C7CDD1; border-radius: 6px; font-size: 14px;">
+                        <option value="">Loading terms...</option>
+                    </select>
+                </div>
+
+                <button id="proc-run-audit" style="width: 100%; padding: 12px; background: #DC3545; color: white; border: none; border-radius: 6px; font-size: 16px; font-weight: 600; cursor: pointer; margin-bottom: 20px; transition: all 0.2s ease;">
+                    Run Audit
+                </button>
+
+                <div id="proc-audit-results" style="display: none;">
+                    <div id="proc-progress-container" style="margin-bottom: 20px;">
+                        <div style="background: #E8EBED; border-radius: 10px; height: 20px; overflow: hidden;">
+                            <div id="proc-progress-bar" style="background: #DC3545; height: 100%; width: 0%; transition: width 0.3s;"></div>
+                        </div>
+                        <p id="proc-progress-text" style="text-align: center; margin-top: 8px; color: #666; font-size: 14px;">Checking courses...</p>
+                    </div>
+
+                    <div id="proc-results-content"></div>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+        console.log('Modal appended to body');
+
+        // Add close button handler
+        document.getElementById('proc-close-modal').onclick = closeModal;
+
+        // Close on Escape key only (not clicking outside)
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                const modalElement = document.getElementById('proctoring-tools-auditor-modal');
+                if (modalElement && modalElement.style.display === 'flex') {
+                    closeModal();
+                }
+            }
+        });
+
+        // Event listeners
+        document.getElementById('proc-run-audit').onclick = runAudit;
+
+        // Add hover effects to run audit button
+        const runAuditBtn = document.getElementById('proc-run-audit');
+        runAuditBtn.addEventListener('mouseenter', function() {
+            if (!this.disabled) {
+                this.style.background = '#C82333';
+                this.style.transform = 'translateY(-2px)';
+                this.style.boxShadow = '0 4px 12px rgba(220,53,69,0.4)';
+            }
+        });
+        runAuditBtn.addEventListener('mouseleave', function() {
+            if (!this.disabled) {
+                this.style.background = '#DC3545';
+                this.style.transform = 'translateY(0)';
+                this.style.boxShadow = 'none';
+            }
+        });
+
+        modalCreated = true;
+        console.log('Modal creation complete');
+    }
+
+    function openModal() {
+        console.log('openModal called');
+
+        // Ensure modal exists
+        if (!modalCreated) {
+            console.log('Modal not created yet, creating now...');
+            createModal();
+        }
+
+        const modal = document.getElementById('proctoring-tools-auditor-modal');
+        console.log('Modal element:', modal);
+
+        if (!modal) {
+            console.error('ERROR: Modal element not found even after createModal()!');
+            alert('Error: Could not create modal. Please refresh the page and try again.');
+            return;
+        }
+
+        modal.style.display = 'flex';
+        console.log('Modal should now be visible');
+
+        if (!termsLoaded) {
+            console.log('Loading terms...');
+            loadTerms();
+        }
+    }
+
+    function closeModal() {
+        const modal = document.getElementById('proctoring-tools-auditor-modal');
+        if (modal) {
+            modal.style.display = 'none';
+            document.getElementById('proc-audit-results').style.display = 'none';
+            document.getElementById('proc-results-content').innerHTML = '';
+        }
+    }
+
+    async function loadTerms() {
+        const termSelect = document.getElementById('proc-term-select');
+        const runButton = document.getElementById('proc-run-audit');
+
+        termSelect.innerHTML = '<option value="">Loading terms...</option>';
+        runButton.disabled = true;
+        runButton.style.background = '#ccc';
+        runButton.textContent = 'Loading...';
+
+        try {
+            allCourses = await fetchAllCourses();
+
+            const terms = {};
+            allCourses.forEach(course => {
+                if (course.enrollment_term_id && course.term && course.term.name) {
+                    terms[course.enrollment_term_id] = course.term.name;
+                }
+            });
+
+            const sortedTerms = Object.entries(terms).sort((a, b) => b[0] - a[0]);
+            termSelect.innerHTML = '<option value="">-- Select a Term --</option>' +
+                sortedTerms.map(([id, name]) => `<option value="${id}">${name}</option>`).join('');
+
+            termsLoaded = true;
+            runButton.disabled = false;
+            runButton.style.background = '#DC3545';
+            runButton.textContent = 'Run Audit';
+
+        } catch (error) {
+            console.error('Error loading terms:', error);
+            termSelect.innerHTML = '<option value="">Error loading terms</option>';
+            runButton.textContent = 'Run Audit';
+            alert('Error loading terms. Please refresh and try again.');
+        }
+    }
+
+    async function fetchAllCourses() {
+        let courses = [];
+        let page = 1;
+        let hasMore = true;
+
+        while (hasMore) {
+            const response = await fetch(`${CANVAS_URL}/api/v1/courses?per_page=100&page=${page}&include[]=term`, {
+                headers: { 'Accept': 'application/json' }
+            });
+
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+            const data = await response.json();
+            courses = courses.concat(data);
+
+            const linkHeader = response.headers.get('Link');
+            hasMore = linkHeader && linkHeader.includes('rel="next"');
+            page++;
+        }
+
+        return courses;
+    }
+
+    async function runAudit() {
+        if (isRunning || !termsLoaded) return;
+
+        const termId = document.getElementById('proc-term-select').value;
+
+        if (!termId) {
+            alert('Please select a term');
+            return;
+        }
+
+        isRunning = true;
+        document.getElementById('proc-run-audit').disabled = true;
+        document.getElementById('proc-run-audit').style.background = '#ccc';
+        document.getElementById('proc-audit-results').style.display = 'block';
+        document.getElementById('proc-results-content').innerHTML = '';
+
+        document.getElementById('proc-progress-container').style.display = 'block';
+        document.getElementById('proc-progress-bar').style.width = '0%';
+        document.getElementById('proc-progress-text').textContent = 'Checking courses...';
+
+        const termCourses = allCourses.filter(c => c.enrollment_term_id == termId);
+
+        await runProctoringAudit(termCourses);
+
+        isRunning = false;
+        document.getElementById('proc-run-audit').disabled = false;
+        document.getElementById('proc-run-audit').style.background = '#DC3545';
+    }
+
+    async function fetchCourseInstructors(courseId) {
+        try {
+            const response = await fetch(`${CANVAS_URL}/api/v1/courses/${courseId}/enrollments?per_page=100&state[]=active`, {
+                headers: { 'Accept': 'application/json' }
+            });
+
+            if (!response.ok) return [];
+
+            const enrollments = await response.json();
+
+            // Define role priorities and labels
+            const roleHierarchy = [
+                { id: '335', label: 'Primary Instructor' },
+                { id: '336', label: 'Secondary Instructor' },
+                { id: '230', label: 'Limited Teacher' },
+                { id: '228', label: 'Teacher (Facilitator)' },
+                { id: '337', label: 'Delegated Access' }
+            ];
+
+            const instructorNames = [];
+
+            // Check each role in priority order
+            for (const role of roleHierarchy) {
+                const enrollment = enrollments.find(e =>
+                    e.role_id === parseInt(role.id) &&
+                    e.user &&
+                    e.user.name &&
+                    e.enrollment_state === 'active'
+                );
+                if (enrollment && enrollment.user && enrollment.user.name) {
+                    instructorNames.push(`${role.label}: ${enrollment.user.name}`);
+                }
+            }
+
+            return instructorNames;
+        } catch (error) {
+            console.error(`Error fetching instructors for course ${courseId}:`, error);
+            return [];
+        }
+    }
+
+    async function runProctoringAudit(termCourses) {
+        const coursesWithProctoring = {
+            'LockDown Browser': [],
+            'Honorlock Proctoring': []
+        };
+        let processed = 0;
+        const BATCH_SIZE = 5;
+        const BATCH_DELAY = 100;
+
+        // Process courses in batches
+        for (let i = 0; i < termCourses.length; i += BATCH_SIZE) {
+            const batch = termCourses.slice(i, i + BATCH_SIZE);
+
+            await Promise.all(batch.map(async (course) => {
+                try {
+                    const quizzes = await fetchCourseQuizzes(course.id);
+
+                    // Check for Honorlock
+                    const honorlockQuizzes = quizzes.filter(q =>
+                        q.access_code && q.access_code.startsWith('HL_NO_EDIT_')
+                    );
+
+                    // Check for LockDown Browser
+                    const lockdownQuizzes = quizzes.filter(q => q.require_lockdown_browser === true);
+
+                    // Fetch instructor names if any proctored quizzes found
+                    if (honorlockQuizzes.length > 0 || lockdownQuizzes.length > 0) {
+                        const instructors = await fetchCourseInstructors(course.id);
+
+                        if (honorlockQuizzes.length > 0) {
+                            coursesWithProctoring['Honorlock Proctoring'].push({
+                                course: course,
+                                quizCount: honorlockQuizzes.length,
+                                quizzes: honorlockQuizzes,
+                                instructors: instructors
+                            });
+                        }
+
+                        if (lockdownQuizzes.length > 0) {
+                            coursesWithProctoring['LockDown Browser'].push({
+                                course: course,
+                                quizCount: lockdownQuizzes.length,
+                                quizzes: lockdownQuizzes,
+                                instructors: instructors
+                            });
+                        }
+                    }
+                } catch (error) {
+                    console.error(`Error checking course ${course.id}:`, error);
+                }
+            }));
+
+            processed += batch.length;
+            updateProgress(processed, termCourses.length);
+
+            // Delay between batches
+            if (i + BATCH_SIZE < termCourses.length) {
+                await new Promise(resolve => setTimeout(resolve, BATCH_DELAY));
+            }
+        }
+
+        currentResults = {
+            type: 'proctoring',
+            coursesWithProctoring: coursesWithProctoring,
+            totalCourses: termCourses.length
+        };
+
+        displayProctoringResults(coursesWithProctoring, termCourses.length);
+    }
+
+    async function fetchCourseQuizzes(courseId) {
+        const response = await fetch(`${CANVAS_URL}/api/v1/courses/${courseId}/quizzes?per_page=100`, {
+            headers: { 'Accept': 'application/json' }
+        });
+
+        if (!response.ok) {
+            if (response.status === 401 || response.status === 403) {
+                return [];
+            }
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        return await response.json();
+    }
+
+    function updateProgress(current, total) {
+        const percent = Math.round((current / total) * 100);
+        document.getElementById('proc-progress-bar').style.width = percent + '%';
+        document.getElementById('proc-progress-text').textContent = `Checking courses... ${current} of ${total}`;
+    }
+
+    function exportToExcel() {
+        if (!currentResults) return;
+        const filename = `proctoring_audit_${new Date().toISOString().split('T')[0]}.xlsx`;
+
+        const wb = XLSX.utils.book_new();
+
+        // Create sheets for each tool that has courses
+        Object.keys(PROCTORING_TOOLS).forEach(toolName => {
+            const courses = currentResults.coursesWithProctoring[toolName];
+            if (courses && courses.length > 0) {
+                const toolConfig = PROCTORING_TOOLS[toolName];
+                const toolData = [];
+                toolData.push(['Course Name', 'Course ID', 'Instructor(s)', 'Quiz Count', 'Tool URL']);
+
+                courses.forEach(item => {
+                    const instructorList = item.instructors && item.instructors.length > 0 ? item.instructors.join(', ') : 'N/A';
+                    const toolUrl = `${CANVAS_URL}/courses/${item.course.id}/external_tools/${toolConfig.toolId}`;
+                    toolData.push([
+                        item.course.name,
+                        item.course.id,
+                        instructorList,
+                        item.quizCount,
+                        toolUrl
+                    ]);
+                });
+
+                // Sanitize sheet name
+                let sheetName = toolName.replace(/[:\\\/\?\*\[\]]/g, '_').substring(0, 31);
+                const ws = XLSX.utils.aoa_to_sheet(toolData);
+                XLSX.utils.book_append_sheet(wb, ws, sheetName);
+            }
+        });
+
+        // Write file
+        XLSX.writeFile(wb, filename);
+    }
+
+    function displayProctoringResults(coursesWithProctoring, totalCourses) {
+        document.getElementById('proc-progress-container').style.display = 'none';
+
+        const lockdownCount = coursesWithProctoring['LockDown Browser'].length;
+        const honorlockCount = coursesWithProctoring['Honorlock Proctoring'].length;
+        const totalWithProctoring = lockdownCount + honorlockCount;
+
+        // Create a combined course view data structure
+        const courseView = {};
+        Object.keys(PROCTORING_TOOLS).forEach(toolName => {
+            coursesWithProctoring[toolName].forEach(item => {
+                if (!courseView[item.course.id]) {
+                    courseView[item.course.id] = {
+                        course: item.course,
+                        instructors: item.instructors,
+                        tools: {}
+                    };
+                }
+                courseView[item.course.id].tools[toolName] = {
+                    quizCount: item.quizCount,
+                    quizzes: item.quizzes
+                };
+            });
+        });
+
+        const resultsHTML = `
+            <div style="margin-bottom: 15px; display: flex; gap: 10px;">
+                <button id="export-excel" style="flex: 1; padding: 10px; background: #28A745; color: white; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s ease;">
+                    📊 Export to Excel
+                </button>
+                <button id="toggle-view" style="flex: 1; padding: 10px; background: #6C757D; color: white; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s ease;">
+                    Switch to Tool View
+                </button>
+            </div>
+
+            <div style="margin-bottom: 20px; padding: 15px; background: #EBF5FB; border-radius: 6px; border-left: 4px solid #3498DB;">
+                <h3 style="margin: 0 0 10px 0; color: #2471A3; font-size: 16px;">📈 Summary</h3>
+                <p style="margin: 0 0 8px 0; color: #2D3B45; font-size: 14px;">
+                    Found <strong>${totalWithProctoring}</strong> course${totalWithProctoring !== 1 ? 's' : ''} with proctored quizzes out of ${totalCourses} total courses in this term.
+                </p>
+                <p style="margin: 0; color: #2D3B45; font-size: 13px; line-height: 1.6;">
+                    <strong>LockDown Browser:</strong> ${lockdownCount} • <strong>Honorlock:</strong> ${honorlockCount}
+                </p>
+            </div>
+
+            <div id="view-container"></div>
+        `;
+
+        document.getElementById('proc-results-content').innerHTML = resultsHTML;
+
+        // Render initial view
+        renderView(coursesWithProctoring, courseView);
+
+        // Add export button handler
+        const exportBtn = document.getElementById('export-excel');
+        if (exportBtn) {
+            exportBtn.addEventListener('click', exportToExcel);
+            exportBtn.addEventListener('mouseenter', function() {
+                this.style.background = '#218838';
+                this.style.transform = 'translateY(-2px)';
+                this.style.boxShadow = '0 4px 12px rgba(40,167,69,0.3)';
+            });
+            exportBtn.addEventListener('mouseleave', function() {
+                this.style.background = '#28A745';
+                this.style.transform = 'translateY(0)';
+                this.style.boxShadow = 'none';
+            });
+        }
+
+        // Add toggle view button handler
+        const toggleBtn = document.getElementById('toggle-view');
+        if (toggleBtn) {
+            toggleBtn.addEventListener('click', function() {
+                currentView = currentView === 'course' ? 'tool' : 'course';
+                this.textContent = currentView === 'course' ? 'Switch to Tool View' : 'Switch to Course View';
+                renderView(coursesWithProctoring, courseView);
+            });
+            toggleBtn.addEventListener('mouseenter', function() {
+                this.style.background = '#5a6268';
+                this.style.transform = 'translateY(-2px)';
+                this.style.boxShadow = '0 4px 12px rgba(108,117,125,0.3)';
+            });
+            toggleBtn.addEventListener('mouseleave', function() {
+                this.style.background = '#6C757D';
+                this.style.transform = 'translateY(0)';
+                this.style.boxShadow = 'none';
+            });
+        }
+    }
+
+    function renderView(coursesWithProctoring, courseView) {
+        const container = document.getElementById('view-container');
+        if (!container) return;
+
+        if (currentView === 'course') {
+            // Course view: Group by course, show tools within
+            const courseList = Object.values(courseView).sort((a, b) =>
+                a.course.name.localeCompare(b.course.name)
+            );
+
+            if (courseList.length === 0) {
+                container.innerHTML = '<div style="padding: 40px; text-align: center; color: #666;"><p>No courses found with proctored quizzes in this term.</p></div>';
+                return;
+            }
+
+            container.innerHTML = `
+                <div style="max-height: 500px; overflow-y: auto;">
+                    ${courseList.map(item => {
+                        const tools = Object.keys(item.tools);
+                        const totalQuizzes = tools.reduce((sum, tool) => sum + item.tools[tool].quizCount, 0);
+
+                        return `
+                            <details open style="margin-bottom: 15px; padding: 15px; background: white; border-radius: 6px; border: 1px solid #ddd;">
+                                <summary style="display: flex; align-items: center; cursor: pointer; user-select: none; list-style: none;">
+                                    <span style="margin-right: 8px; color: #666; font-size: 14px; transition: transform 0.2s;">▶</span>
+                                    <div style="flex: 1;">
+                                        <h4 style="margin: 0; color: #2D3B45; font-size: 15px; font-weight: 600;">
+                                            ${item.course.name}
+                                            <a href="${CANVAS_URL}/courses/${item.course.id}" target="_blank" style="color: #0374B5; text-decoration: none; font-size: 12px; font-weight: 400; margin-left: 8px; transition: color 0.2s;" onclick="event.stopPropagation()" onmouseover="this.style.color='#025a8f'; this.style.textDecoration='underline'" onmouseout="this.style.color='#0374B5'; this.style.textDecoration='none'">[Course Homepage]</a>
+                                            <span style="color: #666; font-size: 13px; font-weight: 400;"> - ${totalQuizzes} proctored quiz${totalQuizzes !== 1 ? 'zes' : ''}</span>
+                                        </h4>
+                                        ${item.instructors && item.instructors.length > 0 ? `<div style="font-size: 11px; color: #666; margin-top: 4px;">${item.instructors.join(', ')}</div>` : ''}
+                                    </div>
+                                </summary>
+                                <div style="margin-top: 12px;">
+                                    ${tools.map(toolName => {
+                                        const toolConfig = PROCTORING_TOOLS[toolName];
+                                        const toolData = item.tools[toolName];
+                                        const isHonorlock = toolName === 'Honorlock Proctoring';
+                                        const toolColor = isHonorlock ? '#0066CC' : '#DC3545';
+                                        const toolIcon = isHonorlock ? '✓' : '🔒';
+
+                                        return `
+                                            <details style="margin-bottom: 8px; padding-left: 15px; border-left: 3px solid ${toolColor};">
+                                                <summary style="display: flex; align-items: center; justify-content: space-between; cursor: pointer; user-select: none; list-style: none; padding: 4px 0;">
+                                                    <div style="display: flex; align-items: center;">
+                                                        <span style="margin-right: 6px; color: ${toolColor}; font-size: 12px; transition: transform 0.2s;">▶</span>
+                                                        <div style="font-weight: 600; color: ${toolColor}; font-size: 14px;">${toolIcon} ${toolName} (${toolData.quizCount})</div>
+                                                    </div>
+                                                    <a href="${CANVAS_URL}/courses/${item.course.id}/external_tools/${toolConfig.toolId}"
+                                                       target="_blank"
+                                                       onclick="event.stopPropagation()"
+                                                       style="background: ${toolColor}; color: white; padding: 4px 12px; border-radius: 4px; text-decoration: none; font-size: 11px; white-space: nowrap; transition: all 0.2s ease; flex-shrink: 0; margin-left: 10px;"
+                                                       onmouseover="this.style.opacity='0.8'; this.style.transform='translateY(-1px)'; this.style.boxShadow='0 2px 6px rgba(0,0,0,0.2)'"
+                                                       onmouseout="this.style.opacity='1'; this.style.transform='translateY(0)'; this.style.boxShadow='none'">
+                                                        Open Tool
+                                                    </a>
+                                                </summary>
+                                                <div style="margin-top: 6px;">
+                                                    ${toolData.quizzes.map(quiz => `
+                                                        <div style="margin-left: 20px; margin-bottom: 4px;">
+                                                            <a href="${CANVAS_URL}/courses/${item.course.id}/quizzes/${quiz.id}" target="_blank" style="color: #0374B5; text-decoration: none; font-size: 13px; transition: color 0.2s;" onmouseover="this.style.color='#025a8f'; this.style.textDecoration='underline'" onmouseout="this.style.color='#0374B5'; this.style.textDecoration='none'">${quiz.title}</a>
+                                                        </div>
+                                                    `).join('')}
+                                                </div>
+                                            </details>
+                                        `;
+                                    }).join('')}
+                                </div>
+                            </details>
+                        `;
+                    }).join('')}
+                </div>
+            `;
+        } else {
+            // Tool view: Group by tool, show courses within
+            container.innerHTML = Object.keys(PROCTORING_TOOLS).map(toolName => {
+                const courses = coursesWithProctoring[toolName];
+                const toolConfig = PROCTORING_TOOLS[toolName];
+                const isHonorlock = toolName === 'Honorlock Proctoring';
+                const toolColor = isHonorlock ? '#0066CC' : '#DC3545';
+                const bgColor = isHonorlock ? '#E3F2FD' : '#FFF3E0';
+                const toolIcon = isHonorlock ? '✓' : '🔒';
+
+                return `
+                    <div style="margin-bottom: 20px; padding: 15px; background: ${bgColor}; border-radius: 8px; border-left: 4px solid ${toolColor};">
+                        <h3 style="margin: 0 0 12px 0; color: ${toolColor}; font-size: 16px;">${toolIcon} ${toolName} (${courses.length})</h3>
+
+                        ${courses.length === 0 ?
+                            `<p style="margin: 0; color: #666; font-size: 13px;">No courses found with ${toolName} quizzes in this term.</p>` :
+                            `
+                            <div style="max-height: 450px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; background: white;">
+                                ${courses.map(item => `
+                                    <details style="margin-bottom: 8px; padding-left: 15px; border-left: 3px solid ${toolColor};">
+                                        <summary style="display: flex; align-items: center; justify-content: space-between; cursor: pointer; user-select: none; list-style: none; padding: 4px 0;">
+                                            <div style="display: flex; align-items: center; flex: 1; min-width: 0;">
+                                                <span style="margin-right: 8px; color: ${toolColor}; font-size: 14px; transition: transform 0.2s;">▶</span>
+                                                <div style="flex: 1; min-width: 0;">
+                                                    <div style="color: #2D3B45; font-size: 14px; font-weight: 600;">
+                                                        ${item.course.name}
+                                                        <a href="${CANVAS_URL}/courses/${item.course.id}" target="_blank" style="color: #0374B5; text-decoration: none; font-size: 12px; font-weight: 400; margin-left: 8px; transition: color 0.2s;" onclick="event.stopPropagation()" onmouseover="this.style.color='#025a8f'; this.style.textDecoration='underline'" onmouseout="this.style.color='#0374B5'; this.style.textDecoration='none'">[Course Homepage]</a>
+                                                    </div>
+                                                    ${item.instructors && item.instructors.length > 0 ? `<div style="font-size: 11px; color: #666; margin-top: 2px;">${item.instructors.join(', ')}</div>` : ''}
+                                                    <div style="font-size: 11px; color: #999; margin-top: 2px;">
+                                                        ${item.quizCount} quiz${item.quizCount !== 1 ? 'zes' : ''}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <a href="${CANVAS_URL}/courses/${item.course.id}/external_tools/${toolConfig.toolId}"
+                                               target="_blank"
+                                               onclick="event.stopPropagation()"
+                                               style="background: ${toolColor}; color: white; padding: 4px 12px; border-radius: 4px; text-decoration: none; font-size: 11px; white-space: nowrap; transition: all 0.2s ease; flex-shrink: 0; margin-left: 10px;"
+                                               onmouseover="this.style.opacity='0.8'; this.style.transform='translateY(-1px)'; this.style.boxShadow='0 2px 6px rgba(0,0,0,0.2)'"
+                                               onmouseout="this.style.opacity='1'; this.style.transform='translateY(0)'; this.style.boxShadow='none'">
+                                                Open Tool
+                                            </a>
+                                        </summary>
+                                        <div style="margin-top: 6px;">
+                                            ${item.quizzes.map(quiz => `
+                                                <div style="margin-left: 20px; margin-bottom: 4px;">
+                                                    <a href="${CANVAS_URL}/courses/${item.course.id}/quizzes/${quiz.id}"
+                                                       target="_blank"
+                                                       style="color: #0374B5; text-decoration: none; font-size: 13px; transition: color 0.2s;"
+                                                       onmouseover="this.style.color='#025a8f'; this.style.textDecoration='underline'"
+                                                       onmouseout="this.style.color='#0374B5'; this.style.textDecoration='none'">
+                                                        ${quiz.title}
+                                                    </a>
+                                                </div>
+                                            `).join('')}
+                                        </div>
+                                    </details>
+                                `).join('')}
+                            </div>
+                            `
+                        }
+                    </div>
+                `;
+            }).join('');
+        }
+    }
+
+    // Initialize
+    function init() {
+        console.log('Proctoring Auditor initializing...');
+
+        // Wait for master panel to be ready with polling
+        const checkPanel = setInterval(() => {
+            if (window.canvasScriptPanel) {
+                clearInterval(checkPanel);
+                console.log('Master panel found, registering script...');
+
+                window.canvasScriptPanel.register({
+                    id: 'proctoring-auditor',
+                    name: 'Quiz Proctoring Auditor',
+                    icon: '🔒',
+                    description: 'Find all courses with LockDown Browser or Honorlock proctored quizzes. Provides direct links to initialize or verify proctoring settings after course copies.',
+                    category: 'Audits',
+                    buttonText: 'Open Auditor',
+                    action: openModal,
+                    closeAfterAction: false
+                });
+                console.log('Script registered with master panel');
+            }
+        }, 100);
+
+        // Stop checking after 10 seconds if panel never loads
+        setTimeout(() => {
+            clearInterval(checkPanel);
+            if (!window.canvasScriptPanel) {
+                console.warn('Master panel not found after 10 seconds');
+            }
+        }, 10000);
+
+        // Create the modal regardless of panel status
+        createModal();
+        console.log('Initialization complete');
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+})();
