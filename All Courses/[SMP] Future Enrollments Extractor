@@ -1,0 +1,147 @@
+// ==UserScript==
+// @name         Canvas | All Courses | [SMP] Future Enrollments Extractor
+// @namespace    http://tampermonkey.net/
+// @version      4.1
+// @description  Extract Course IDs and URL Numbers from Future Enrollments - works with Canvas Scripts Master Panel
+// @author       ChatGPT, Alex, & Claude
+// @match        https://*.instructure.com/courses
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    let isRunning = false;
+
+    // Extract and copy the course data
+    function extractFutureEnrollments() {
+        if (isRunning) return;
+        isRunning = true;
+
+        const panelButton = document.querySelector('.script-action-btn[data-script-id="future-enrollments"]');
+
+        // Update button to show it's running
+        if (panelButton) {
+            panelButton.disabled = true;
+            panelButton.style.background = '#ccc';
+            panelButton.style.cursor = 'not-allowed';
+            panelButton.innerHTML = 'Extracting...';
+        }
+
+        // Use setTimeout to allow UI to update
+        setTimeout(() => {
+            try {
+                // Column headers for Excel
+                const data = ["Course ID\tURL Number"];
+                const table = document.querySelector('#future_enrollments_table tbody');
+
+                if (!table) {
+                    updateButtonStatus(panelButton, '❌ Table not found!', '#DB4437');
+                    return;
+                }
+
+                const rows = table.querySelectorAll('tr');
+
+                if (rows.length === 0) {
+                    updateButtonStatus(panelButton, '⚠️ No enrollments found', '#F4B400');
+                    return;
+                }
+
+                let extractedCount = 0;
+                let skippedCount = 0;
+
+                rows.forEach(row => {
+                    const courseLink = row.querySelector('td.course-list-course-title-column a');
+                    if (courseLink) {
+                        const courseID = courseLink.getAttribute('title')?.trim();
+                        const href = courseLink.getAttribute('href');
+                        const courseURLMatch = href?.match(/\/courses\/(\d+)/);
+
+                        if (courseID && courseURLMatch && courseURLMatch[1]) {
+                            const courseURLNumber = courseURLMatch[1];
+                            data.push(`${courseID}\t${courseURLNumber}`);
+                            extractedCount++;
+                        } else {
+                            skippedCount++;
+                            console.warn('Skipped row due to missing data:', { courseID, href });
+                        }
+                    }
+                });
+
+                if (extractedCount === 0) {
+                    updateButtonStatus(panelButton, '❌ No data extracted!', '#DB4437');
+                    return;
+                }
+
+                // Copy to clipboard
+                navigator.clipboard.writeText(data.join('\n'))
+                    .then(() => {
+                        let message = `✓ Copied ${extractedCount}!`;
+                        if (skippedCount > 0) {
+                            message += ` (${skippedCount} skipped)`;
+                        }
+                        updateButtonStatus(panelButton, message, '#0C9D58');
+                    })
+                    .catch(err => {
+                        console.error('Failed to copy data:', err);
+                        updateButtonStatus(panelButton, '❌ Copy failed!', '#DB4437');
+                    });
+            } catch (error) {
+                console.error('Error extracting course data:', error);
+                updateButtonStatus(panelButton, '❌ Error occurred!', '#DB4437');
+            }
+        }, 50);
+    }
+
+    // Update button with status message and reset after delay
+    function updateButtonStatus(button, message, color) {
+        if (!button) {
+            isRunning = false;
+            return;
+        }
+
+        button.style.background = color;
+        button.innerHTML = message;
+
+        // Reset after 2.5 seconds
+        setTimeout(() => {
+            button.disabled = false;
+            button.style.background = '#112d54';
+            button.style.cursor = 'pointer';
+            button.innerHTML = 'Extract & Copy';
+            isRunning = false;
+        }, 2500);
+    }
+
+    // Initialize the script
+    function init() {
+        // Wait for master panel to be ready
+        const checkPanel = setInterval(() => {
+            if (window.canvasScriptPanel) {
+                clearInterval(checkPanel);
+
+                // Register with the master panel
+                window.canvasScriptPanel.register({
+                    id: 'future-enrollments',
+                    name: 'Future Enrollments Extractor',
+                    icon: '📋',
+                    description: 'Extract Course IDs and URL numbers from the Future Enrollments table. Copies data in tab-separated format ready to paste into Excel.',
+                    category: 'Miscellaneous',
+                    buttonText: 'Extract & Copy',
+                    action: extractFutureEnrollments,
+                    closeAfterAction: false
+                });
+            }
+        }, 100);
+
+        // Stop checking after 5 seconds if panel never loads
+        setTimeout(() => clearInterval(checkPanel), 5000);
+    }
+
+    // Start the script when DOM is ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
